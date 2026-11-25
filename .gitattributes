@@ -1,0 +1,7 @@
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
+*.patch -text
+*.png binary
+*.ttf binary
+*.arsc binary

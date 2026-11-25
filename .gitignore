@@ -1,0 +1,7 @@
+out/
+*.apk
+*.keystore
+*.jks
+*.pass
+local.properties
+__pycache__/
