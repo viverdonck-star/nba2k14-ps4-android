@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14-offline-port <nba2k14-offline@localhost>
+Date: Fri, 30 Oct 2026 22:23:25 +0100
+Subject: [PATCH 15/40] Add opt-in scanout format diagnostics for NBA
+ black-screen triage
+
+---
+ src/video_core/renderer_vulkan/vk_presenter.cpp | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/video_core/renderer_vulkan/vk_presenter.cpp b/src/video_core/renderer_vulkan/vk_presenter.cpp
+index afcd3d8f..55674773 100644
+--- a/src/video_core/renderer_vulkan/vk_presenter.cpp
++++ b/src/video_core/renderer_vulkan/vk_presenter.cpp
+@@ -750,6 +750,16 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup&
+     view_info.mapping.a = vk::ComponentSwizzle::eOne;
+ 
+     auto& image = texture_cache.GetImage(image_id);
++    static const bool nba_scanout_diag = std::getenv("NBA2K14_SCANOUT_DIAG") != nullptr;
++    static unsigned scanout_count{};
++    if (nba_scanout_diag && ++scanout_count % 300 == 0) {
++        LOG_INFO(Render_Vulkan,
++                 "NBA2K14_SCANOUT addr={:#x} request={}x{} pitch={} tile={} backing={}x{} pitch={} tile={} flags={:#x}",
++                 cpu_address, desc.info.size.width, desc.info.size.height, desc.info.pitch,
++                 static_cast<u32>(desc.info.tile_mode), image.info.size.width,
++                 image.info.size.height, image.info.pitch, static_cast<u32>(image.info.tile_mode),
++                 static_cast<u32>(image.flags));
++    }
+     auto image_view = *image.FindView(view_info).image_view;
+     const vk::Extent2D image_size = {image.info.size.width, image.info.size.height};
+     expected_ratio = static_cast<float>(image_size.width) / static_cast<float>(image_size.height);

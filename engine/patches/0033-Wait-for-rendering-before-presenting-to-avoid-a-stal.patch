@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 Android port <nba2k14-android@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 18:54:48 +0100
+Subject: [PATCH 33/40] Wait for rendering before presenting to avoid a stale
+ band
+
+Fixes the stale band at the top of the screen: the display path can
+read the swapchain image before the GPU has finished it.
+Waits for the frame's fence before presenting.
+NBA2K14_NO_PRESENT_WAIT=1 restores the old behaviour for comparison.
+---
+ src/video_core/renderer_vulkan/vk_presenter.cpp | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/src/video_core/renderer_vulkan/vk_presenter.cpp b/src/video_core/renderer_vulkan/vk_presenter.cpp
+index fdcc259b..cd8258fb 100644
+--- a/src/video_core/renderer_vulkan/vk_presenter.cpp
++++ b/src/video_core/renderer_vulkan/vk_presenter.cpp
+@@ -1202,6 +1202,12 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
+         LOG_INFO(Render_Vulkan, "BACHATA_PRESENT_TRACE id={} stage=flush_done", trace_id);
+     }
+ 
++    static const bool wait_before_present = std::getenv("NBA2K14_NO_PRESENT_WAIT") == nullptr;
++    if (wait_before_present) {
++        [[maybe_unused]] const auto wait_result =
++            instance.GetDevice().waitForFences(frame->present_done, false, 1'000'000'000);
++    }
++
+     // Present to swapchain.
+     {
+         std::scoped_lock submit_lock{Scheduler::submit_mutex};

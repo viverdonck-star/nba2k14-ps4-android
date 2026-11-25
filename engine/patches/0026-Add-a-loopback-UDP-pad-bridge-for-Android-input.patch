@@ -1,0 +1,95 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 Android port <nba2k14-android@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 18:54:48 +0100
+Subject: [PATCH 26/40] Add a loopback UDP pad bridge for Android input
+
+Loopback pad input: Termux has no access to the Odin's gamepad, so a
+relay (or the future Android app)
+sends the pad state to 127.0.0.1:27014 and the engine applies it with
+ApplyRemoteState.
+---
+ src/main.cpp | 57 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 57 insertions(+)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index caaa2fb8..22846e88 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1,6 +1,11 @@
+ // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <array>
++#include <thread>
++#include <arpa/inet.h>
++#include <netinet/in.h>
++#include <sys/socket.h>
+ #include <array>
+ #include <atomic>
+ #include <filesystem>
+@@ -183,6 +188,54 @@ static void InstallBachataSigsysTrap() {
+     sigaction(SIGSYS, &sa, &g_old_sigsys_action);
+ }
+ 
++#ifdef ENABLE_NBA_2K14_COMPATIBILITY
++namespace {
++// Packet: magic, Orbis button mask, then LX LY RX RY L2 R2 as 0..255 (sticks centred on 128).
++struct NbaPadPacket {
++    u32 magic;
++    u32 buttons;
++    u8 axes[6];
++    u8 pad[2];
++};
++static_assert(sizeof(NbaPadPacket) == 16);
++constexpr u32 NBA_PAD_MAGIC = 0x504b324e;
++constexpr u16 NBA_PAD_PORT = 27014;
++
++void StartNbaPadBridge() {
++    const int fd = socket(AF_INET, SOCK_DGRAM, 0);
++    sockaddr_in addr{};
++    addr.sin_family = AF_INET;
++    addr.sin_port = htons(NBA_PAD_PORT);
++    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++    if (fd < 0 || bind(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0) {
++        LOG_ERROR(Input, "NBA2K14 pad bridge could not bind port {}", NBA_PAD_PORT);
++        return;
++    }
++    LOG_INFO(Input, "NBA2K14 pad bridge listening on 127.0.0.1:{}", NBA_PAD_PORT);
++    std::thread([fd] {
++        auto* controllers = Common::Singleton<Input::GameControllers>::Instance();
++        bool first = true;
++        while (true) {
++            NbaPadPacket packet{};
++            if (recv(fd, &packet, sizeof(packet), 0) != sizeof(packet) ||
++                packet.magic != NBA_PAD_MAGIC) {
++                continue;
++            }
++            if (first) {
++                first = false;
++                LOG_INFO(Input, "NBA2K14 pad bridge received its first packet");
++            }
++            const std::array<int, 6> axes = {packet.axes[0], packet.axes[1], packet.axes[2],
++                                             packet.axes[3], packet.axes[4], packet.axes[5]};
++            (*controllers)[0]->ApplyRemoteState(
++                static_cast<Libraries::Pad::OrbisPadButtonDataOffset>(packet.buttons), axes, false,
++                0.0f, 0.0f);
++        }
++    }).detach();
++}
++} // namespace
++#endif
++
+ int main(int argc, char* argv[]) {
+     InstallBachataSigsysTrap();
+ #ifdef _WIN32
+@@ -475,6 +528,10 @@ int main(int argc, char* argv[]) {
+     }
+ #endif
+ 
++#ifdef ENABLE_NBA_2K14_COMPATIBILITY
++    StartNbaPadBridge();
++#endif
++
+     auto* emulator = Common::Singleton<Core::Emulator>::Instance();
+     emulator->executableName = argv[0];
+     emulator->waitForDebuggerBeforeRun = waitForDebugger;

@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 Android port <nba2k14-android@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 18:54:48 +0100
+Subject: [PATCH 32/40] Downmix the game's 8-channel output to stereo
+
+The game mixes to 8 channels (FL FR C LFE BL BR SL SR); the engine kept
+only FL and FR, losing whatever sits elsewhere.
+---
+ src/platform/bachata/audio_transport.cpp | 21 +++++++++++----------
+ 1 file changed, 11 insertions(+), 10 deletions(-)
+
+diff --git a/src/platform/bachata/audio_transport.cpp b/src/platform/bachata/audio_transport.cpp
+index 9b0e11d0..2c947474 100644
+--- a/src/platform/bachata/audio_transport.cpp
++++ b/src/platform/bachata/audio_transport.cpp
+@@ -42,16 +42,17 @@ std::vector<std::int16_t> ConvertPcmToStereo(const void* source, std::uint32_t f
+         return static_cast<std::int16_t>(std::lround(scaled * 32767.0f));
+     };
+     for (std::uint32_t frame = 0; frame < frames; ++frame) {
+-        float left = 0.0f;
+-        float right = 0.0f;
+-        if (is_float) {
+-            const auto* samples = static_cast<const float*>(source) + frame * channels;
+-            left = samples[0];
+-            right = channels == 1 ? left : samples[1];
+-        } else {
+-            const auto* samples = static_cast<const std::int16_t*>(source) + frame * channels;
+-            left = samples[0] / 32768.0f;
+-            right = channels == 1 ? left : samples[1] / 32768.0f;
++        const auto read_channel = [&](std::uint8_t channel) {
++            const std::size_t index = std::size_t{frame} * channels + channel;
++            return is_float ? static_cast<const float*>(source)[index]
++                            : static_cast<const std::int16_t*>(source)[index] / 32768.0f;
++        };
++        float left = read_channel(0);
++        float right = channels == 1 ? left : read_channel(1);
++        if (channels == 8) {
++            const float centre = read_channel(2);
++            left = (left + 0.7f * centre + 0.5f * (read_channel(4) + read_channel(6))) * 0.7f;
++            right = (right + 0.7f * centre + 0.5f * (read_channel(5) + read_channel(7))) * 0.7f;
+         }
+         result[frame * 2] = convert(left);
+         result[frame * 2 + 1] = convert(right);

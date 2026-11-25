@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 offline port <nba2k14-offline@localhost>
+Date: Fri, 30 Oct 2026 11:42:56 +0100
+Subject: [PATCH 01/40] Add opt-in NBA 2K14 offline compatibility title gate
+
+---
+ CMakeLists.txt                    |  5 +++++
+ src/core/nba_2k14_compatibility.h | 31 +++++++++++++++++++++++++++++++
+ 2 files changed, 36 insertions(+)
+ create mode 100644 src/core/nba_2k14_compatibility.h
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e56c54a1..8c2a0cec 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -39,6 +39,7 @@ cmake_dependent_option(ENABLE_SYSTEM_VULKAN "Enable the system Vulkan driver" OF
+ option(ENABLE_DISCORD_RPC "Enable the Discord RPC integration" ON)
+ option(ENABLE_UPDATER "Enables the options to updater" ON)
+ option(ENABLE_TESTS "Build unit tests (requires GTest)" OFF)
++option(ENABLE_NBA_2K14_COMPATIBILITY "Enable NBA 2K14 offline compatibility" OFF)
+ option(ENABLE_BACHATA_RUNTIME "Build x86-64 Android-container runtime mode" OFF)
+ option(ENABLE_SYSTEM_LIBRARIES "Enable building against system libraries" OFF)
+ option(ENABLE_FEX_GUEST_CPU "Build the native ARM64 FEXCore guest CPU backend" OFF)
+@@ -1344,6 +1345,10 @@ if (ENABLE_DISCORD_RPC)
+     target_compile_definitions(shadps4 PRIVATE ENABLE_DISCORD_RPC)
+ endif()
+ 
++if (ENABLE_NBA_2K14_COMPATIBILITY)
++    target_compile_definitions(shadps4 PRIVATE ENABLE_NBA_2K14_COMPATIBILITY)
++endif()
++
+ if (${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
+     # Optional due to https://github.com/shadps4-emu/shadPS4/issues/1704
+     if (ENABLE_USERFAULTFD)
+diff --git a/src/core/nba_2k14_compatibility.h b/src/core/nba_2k14_compatibility.h
+new file mode 100644
+index 00000000..71e53b7d
+--- /dev/null
++++ b/src/core/nba_2k14_compatibility.h
+@@ -0,0 +1,31 @@
++// SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#pragma once
++
++#include <string_view>
++
++namespace Core::Nba2K14Compatibility {
++
++inline bool IsTitle(std::string_view title) noexcept {
++    static constexpr std::string_view Expected = "NBA2K14";
++    size_t expected_index = 0;
++
++    for (unsigned char character : title) {
++        if (character >= 'a' && character <= 'z') {
++            character = static_cast<unsigned char>(character - ('a' - 'A'));
++        }
++        if (!((character >= 'A' && character <= 'Z') ||
++              (character >= '0' && character <= '9'))) {
++            continue;
++        }
++        if (expected_index == Expected.size() || character != Expected[expected_index]) {
++            return false;
++        }
++        ++expected_index;
++    }
++
++    return expected_index == Expected.size();
++}
++
++} // namespace Core::Nba2K14Compatibility

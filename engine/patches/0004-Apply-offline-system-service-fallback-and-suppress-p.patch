@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 offline port <nba2k14-offline@localhost>
+Date: Fri, 30 Oct 2026 11:43:23 +0100
+Subject: [PATCH 04/40] Apply offline system-service fallback and suppress
+ placeholder key files
+
+---
+ src/common/key_manager.cpp                  | 2 ++
+ src/core/libraries/system/systemservice.cpp | 8 ++++++++
+ src/main.cpp                                | 5 ++++-
+ 3 files changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/src/common/key_manager.cpp b/src/common/key_manager.cpp
+index 3497ec8d..7bf7aefa 100644
+--- a/src/common/key_manager.cpp
++++ b/src/common/key_manager.cpp
+@@ -19,7 +19,9 @@ KeyManager::KeyManager() {
+     SetDefaultKeys();
+ }
+ KeyManager::~KeyManager() {
++#ifndef ENABLE_NBA_2K14_COMPATIBILITY
+     SaveToFile();
++#endif
+ }
+ 
+ std::shared_ptr<KeyManager> KeyManager::GetInstance() {
+diff --git a/src/core/libraries/system/systemservice.cpp b/src/core/libraries/system/systemservice.cpp
+index 3c943f23..5d8a7047 100644
+--- a/src/core/libraries/system/systemservice.cpp
++++ b/src/core/libraries/system/systemservice.cpp
+@@ -8,6 +8,9 @@
+ #include "core/file_sys/fs.h"
+ #include "core/libraries/kernel/process.h"
+ #include "core/libraries/libs.h"
++#ifdef ENABLE_NBA_2K14_COMPATIBILITY
++#include "core/nba_2k14_compatibility.h"
++#endif
+ #include "core/libraries/system/systemservice.h"
+ #include "core/libraries/system/systemservice_error.h"
+ #include "emulator.h"
+@@ -1785,7 +1788,12 @@ s32 PS4_SYSV_ABI sceSystemServiceGetStatus(OrbisSystemServiceStatus* status) {
+     status->event_num = static_cast<s32>(g_event_queue.size());
+     status->is_system_ui_overlaid = false;
+     status->is_in_background_execution = false;
++#ifdef ENABLE_NBA_2K14_COMPATIBILITY
++    status->is_cpu_mode7_cpu_normal =
++        !Core::Nba2K14Compatibility::IsTitle(Common::ElfInfo::Instance().Title());
++#else
+     status->is_cpu_mode7_cpu_normal = true;
++#endif
+     status->is_game_live_streaming_on_air = false;
+     status->is_out_of_vr_play_area = false;
+     return ORBIS_OK;
+diff --git a/src/main.cpp b/src/main.cpp
+index 13733edf..caaa2fb8 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -358,9 +358,12 @@ int main(int argc, char* argv[]) {
+     }
+ #endif
+ 
+-    // Initialize key manager
++#ifndef ENABLE_NBA_2K14_COMPATIBILITY
++    // Initialize key manager for general-purpose builds. The NBA 2K14 portable runtime does not
++    // require console keys and must not create a placeholder keys.json during normal startup.
+     auto key_manager = KeyManager::GetInstance();
+     key_manager->LoadFromFile();
++#endif
+ 
+     // Load configurations
+     std::shared_ptr<EmulatorSettingsImpl> emu_settings = std::make_shared<EmulatorSettingsImpl>();

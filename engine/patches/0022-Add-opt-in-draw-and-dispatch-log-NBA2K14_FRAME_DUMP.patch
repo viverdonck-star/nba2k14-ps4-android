@@ -1,0 +1,190 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 Android port <nba2k14-android@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 18:54:48 +0100
+Subject: [PATCH 22/40] Add opt-in draw and dispatch log (NBA2K14_FRAME_DUMP)
+
+Adds NBA2K14_FRAME_DUMP=<ms>: after that delay, logs the next 400
+draws/dispatches and writes every
+colour texture and render target they touch, so the first scrambled
+step of a frame can be identified.
+---
+ .../renderer_vulkan/vk_rasterizer.cpp         | 145 ++++++++++++++++++
+ 1 file changed, 145 insertions(+)
+
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index 99db6950..383c2d2c 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -1,6 +1,11 @@
+ // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <set>
++#include <string>
+ #include "common/debug.h"
+ #include "core/emulator_settings.h"
+ #include "core/memory.h"
+@@ -53,6 +58,112 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
+ 
+ Rasterizer::~Rasterizer() = default;
+ 
++
++#include <vk_mem_alloc.h>
++
++namespace {
++// Diagnostic only: NBA2K14_FRAME_DUMP=<ms after the first draw>, NBA2K14_FRAME_DUMP_DIR=<folder>.
++struct FrameDump {
++    s64 start_ms = -1;
++    s64 first_ms = -1;
++    std::string dir;
++    int remaining = 400;
++    int index = 0;
++    std::set<u64> seen;
++    VideoCore::ImageId last_rt{};
++};
++
++FrameDump& GetFrameDump() {
++    static FrameDump dump = [] {
++        FrameDump d;
++        if (const char* ms = std::getenv("NBA2K14_FRAME_DUMP")) {
++            d.start_ms = std::atoll(ms);
++        }
++        const char* dir = std::getenv("NBA2K14_FRAME_DUMP_DIR");
++        d.dir = dir ? dir : "framedump";
++        return d;
++    }();
++    return dump;
++}
++
++bool FrameDumpActive() {
++    auto& d = GetFrameDump();
++    if (d.start_ms < 0 || d.remaining <= 0) {
++        return false;
++    }
++    const s64 now = std::chrono::duration_cast<std::chrono::milliseconds>(
++                        std::chrono::steady_clock::now().time_since_epoch())
++                        .count();
++    if (d.first_ms < 0) {
++        d.first_ms = now;
++    }
++    return now - d.first_ms >= d.start_ms;
++}
++
++std::string DescribeImage(const VideoCore::Image& image) {
++    return fmt::format("addr={:#x} {}x{} pitch={} tile={} bits={} fmt={} mips={} layers={} samples={}",
++                       image.info.guest_address, image.info.size.width, image.info.size.height,
++                       image.info.pitch, static_cast<u32>(image.info.tile_mode), image.info.num_bits,
++                       static_cast<u32>(image.info.pixel_format), image.info.resources.levels,
++                       image.info.resources.layers, image.info.num_samples);
++}
++
++void DumpImageToFile(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler,
++                     VideoCore::Image& image, const std::string& tag) {
++    if (image.info.num_samples > 1 || image.info.props.is_depth || image.info.props.is_volume) {
++        return;
++    }
++    auto& d = GetFrameDump();
++    const u32 w = image.info.size.width;
++    const u32 h = image.info.size.height;
++    const u32 ew = image.info.props.is_block ? std::max((w + 3) / 4, 1U) : w;
++    const u32 eh = image.info.props.is_block ? std::max((h + 3) / 4, 1U) : h;
++    const u64 bytes = u64(ew) * eh * (image.info.num_bits / 8);
++    scheduler.EndRendering();
++    const VkBufferCreateInfo buffer_ci = {
++        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
++        .size = bytes,
++        .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
++    };
++    const VmaAllocationCreateInfo alloc_ci = {
++        .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
++        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
++    };
++    VkBuffer buffer{};
++    VmaAllocation allocation{};
++    VmaAllocationInfo info{};
++    if (vmaCreateBuffer(instance.GetAllocator(), &buffer_ci, &alloc_ci, &buffer, &allocation,
++                        &info) != VK_SUCCESS) {
++        LOG_ERROR(Render_Vulkan, "NBA2K14_FRAME_DUMP buffer failed {}", tag);
++        return;
++    }
++    image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {});
++    const vk::BufferImageCopy region = {
++        .bufferOffset = 0,
++        .imageSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor,
++                             .mipLevel = 0,
++                             .baseArrayLayer = 0,
++                             .layerCount = 1},
++        .imageExtent = {w, h, 1},
++    };
++    scheduler.CommandBuffer().copyImageToBuffer(image.GetImage(),
++                                                vk::ImageLayout::eTransferSrcOptimal, buffer, region);
++    scheduler.Finish();
++    vmaInvalidateAllocation(instance.GetAllocator(), allocation, 0, VK_WHOLE_SIZE);
++    const auto path = fmt::format("{}/{:04}_{}_{:x}_{}x{}_b{}_f{}_t{}.bin", d.dir, d.index, tag,
++                                  image.info.guest_address, w, h, image.info.num_bits,
++                                  static_cast<u32>(image.info.pixel_format),
++                                  static_cast<u32>(image.info.tile_mode));
++    if (std::FILE* f = std::fopen(path.c_str(), "wb")) {
++        std::fwrite(info.pMappedData, 1, bytes, f);
++        std::fclose(f);
++    } else {
++        LOG_ERROR(Render_Vulkan, "NBA2K14_FRAME_DUMP cannot write {}", path);
++    }
++    vmaDestroyBuffer(instance.GetAllocator(), buffer, allocation);
++}
++} // namespace
++
+ void Rasterizer::CpSync() {
+     scheduler.EndRendering();
+     auto cmdbuf = scheduler.CommandBuffer();
+@@ -237,6 +348,28 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
+                     instance_offset);
+     }
+ 
++    if (FrameDumpActive()) {
++        auto& dump = GetFrameDump();
++        ++dump.index;
++        --dump.remaining;
++        const auto rt_id = cb_descs[0].first;
++        if (dump.last_rt && dump.last_rt != rt_id) {
++            DumpImageToFile(instance, scheduler, texture_cache.GetImage(dump.last_rt), "rtdone");
++        }
++        dump.last_rt = rt_id;
++        std::string line = rt_id ? DescribeImage(texture_cache.GetImage(rt_id)) : "none";
++        for (const auto id : bound_images) {
++            auto& image = texture_cache.GetImage(id);
++            line += " | tex " + DescribeImage(image);
++            if (dump.seen.insert(image.info.guest_address).second) {
++                DumpImageToFile(instance, scheduler, image, "tex");
++            }
++        }
++        const auto& fs = pipeline->GetStage(Shader::LogicalStage::Fragment);
++        LOG_INFO(Render_Vulkan, "NBA2K14_DRAW {} vs={:#x} fs={:#x} verts={} rt {}", dump.index,
++                 vs_info.pgm_hash, fs.pgm_hash, regs.num_indices, line);
++    }
++
+     ResetBindings();
+     RetireIsolatedReadConstSnapshots();
+ }
+@@ -337,6 +470,18 @@ void Rasterizer::DispatchDirect() {
+     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
+     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
+ 
++    if (FrameDumpActive()) {
++        auto& dump = GetFrameDump();
++        ++dump.index;
++        --dump.remaining;
++        std::string line;
++        for (const auto id : bound_images) {
++            auto& image = texture_cache.GetImage(id);
++            line += " | img " + DescribeImage(image);
++            DumpImageToFile(instance, scheduler, image, "cs");
++        }
++        LOG_INFO(Render_Vulkan, "NBA2K14_DISPATCH {} {}", dump.index, line);
++    }
+     ResetBindings();
+ }
+ 

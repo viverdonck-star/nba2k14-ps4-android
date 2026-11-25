@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 Android port <nba2k14-android@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 18:54:48 +0100
+Subject: [PATCH 34/40] Add count and log-only options to NBA2K14_FRAME_DUMP
+
+Extends NBA2K14_FRAME_DUMP: NBA2K14_FRAME_DUMP_COUNT=<n> sets how many
+draws to log, NBA2K14_FRAME_DUMP_NOFILES=1 logs without writing images.
+---
+ src/video_core/renderer_vulkan/vk_rasterizer.cpp | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index 383c2d2c..039112e8 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -81,6 +81,9 @@ FrameDump& GetFrameDump() {
+         }
+         const char* dir = std::getenv("NBA2K14_FRAME_DUMP_DIR");
+         d.dir = dir ? dir : "framedump";
++        if (const char* count = std::getenv("NBA2K14_FRAME_DUMP_COUNT")) {
++            d.remaining = std::atoi(count);
++        }
+         return d;
+     }();
+     return dump;
+@@ -110,6 +113,10 @@ std::string DescribeImage(const VideoCore::Image& image) {
+ 
+ void DumpImageToFile(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler,
+                      VideoCore::Image& image, const std::string& tag) {
++    static const bool no_files = std::getenv("NBA2K14_FRAME_DUMP_NOFILES") != nullptr;
++    if (no_files) {
++        return;
++    }
+     if (image.info.num_samples > 1 || image.info.props.is_depth || image.info.props.is_volume) {
+         return;
+     }

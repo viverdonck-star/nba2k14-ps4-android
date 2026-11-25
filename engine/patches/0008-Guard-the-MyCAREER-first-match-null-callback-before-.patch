@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 offline port <nba2k14-offline@localhost>
+Date: Fri, 30 Oct 2026 11:43:51 +0100
+Subject: [PATCH 08/40] Guard the MyCAREER first-match null callback before
+ guest execution
+
+---
+ src/core/module.cpp | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/src/core/module.cpp b/src/core/module.cpp
+index 4bfe9d7b..969880b0 100644
+--- a/src/core/module.cpp
++++ b/src/core/module.cpp
+@@ -369,6 +369,28 @@ void Module::LoadModuleToMemory(u32& max_tls_index) {
+             LOG_ERROR(Core_Linker, "NBA2K14: save-owner patch site mismatch; not patching");
+         }
+     }
++    if (is_supported_offline_eboot) {
++        // The first MyCAREER match can call through a null global at 0x21eeaa0.
++        // Validate BOTH sites before installing the cave, then redirect the call last.
++        constexpr u64 cave_va = 0x1aa1000;
++        constexpr u64 call_va = 0x10f505a;
++        constexpr std::array<u8, 21> empty_cave{};
++        constexpr std::array<u8, 21> cave{
++            0x48, 0xa1, 0xa0, 0xea, 0x1e, 0x02, 0x00, 0x00, 0x00, 0x00,
++            0x48, 0x85, 0xc0, 0x74, 0x05, 0xe9, 0x5c, 0x3e, 0x65, 0xff, 0xc3};
++        constexpr std::array<u8, 5> old_call{0xe8, 0x11, 0xfe, 0xff, 0xff};
++        constexpr std::array<u8, 5> new_call{0xe8, 0xa1, 0xbf, 0x9a, 0x00};
++        if (contains_code(cave_va, cave.size()) && contains_code(call_va, old_call.size()) &&
++            std::memcmp(reinterpret_cast<const void*>(cave_va), empty_cave.data(), empty_cave.size()) == 0 &&
++            std::memcmp(reinterpret_cast<const void*>(call_va), old_call.data(), old_call.size()) == 0) {
++            ASSERT_MSG(WriteNba2K14CompatibilityBytes(cave_va, cave) &&
++                       WriteNba2K14CompatibilityBytes(call_va, new_call),
++                       "NBA2K14: could not install complete NULLGUARD patch");
++            LOG_INFO(Core_Linker, "NBA2K14: applied NULLGUARD patches 2/2");
++        } else {
++            LOG_ERROR(Core_Linker, "NBA2K14: NULLGUARD site mismatch; neither site patched");
++        }
++    }
+ #endif
+ 
+ #ifdef ENABLE_NBA_2K14_COMPATIBILITY

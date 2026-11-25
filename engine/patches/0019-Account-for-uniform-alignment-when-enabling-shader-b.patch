@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14-offline-port <nba2k14-offline@localhost>
+Date: Sat, 31 Oct 2026 07:43:27 +0100
+Subject: [PATCH 19/40] Account for uniform alignment when enabling shader
+ buffer offsets
+
+---
+ src/video_core/renderer_vulkan/vk_pipeline_cache.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp b/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+index b0ce8a33..56634326 100644
+--- a/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
++++ b/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+@@ -305,7 +305,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
+                                       instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
+         .needs_lds_barriers = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary ||
+                               instance.GetDriverID() == vk::DriverId::eMesaKosmickrisp,
+-        .needs_buffer_offsets = instance.StorageMinAlignment() > 4,
++        .needs_buffer_offsets = instance.StorageMinAlignment() > 4 || instance.UniformMinAlignment() > 4,
+         .needs_unorm_fixup = instance.GetDriverID() == vk::DriverId::eMesaKosmickrisp,
+         .needs_clip_distance_emulation = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
+         .needs_bit_preserving_buffer0_loads =

@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14-offline-port <nba2k14-offline@localhost>
+Date: Fri, 30 Oct 2026 22:45:46 +0100
+Subject: [PATCH 16/40] Synchronize tiled texture sources for compute shader
+ reads
+
+---
+ src/video_core/texture_cache/texture_cache.cpp | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/src/video_core/texture_cache/texture_cache.cpp b/src/video_core/texture_cache/texture_cache.cpp
+index d653c839..f14c73b4 100644
+--- a/src/video_core/texture_cache/texture_cache.cpp
++++ b/src/video_core/texture_cache/texture_cache.cpp
+@@ -931,8 +931,10 @@ void TextureCache::RefreshImage(Image& image) {
+ 
+     const auto [in_buffer, in_offset] =
+         buffer_cache.ObtainBufferForImage(image.info.guest_address, image.info.guest_size);
+-    if (auto barrier = in_buffer->GetBarrier(vk::AccessFlagBits2::eTransferRead,
+-                                             vk::PipelineStageFlagBits2::eTransfer)) {
++    const bool tiled_upload = image.info.props.is_tiled;
++    if (auto barrier = in_buffer->GetBarrier(
++            tiled_upload ? vk::AccessFlagBits2::eShaderRead : vk::AccessFlagBits2::eTransferRead,
++            tiled_upload ? vk::PipelineStageFlagBits2::eComputeShader : vk::PipelineStageFlagBits2::eTransfer)) {
+         scheduler.CommandBuffer().pipelineBarrier2(vk::DependencyInfo{
+             .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+             .bufferMemoryBarrierCount = 1,

@@ -1,0 +1,153 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 offline port <nba2k14-offline@localhost>
+Date: Fri, 30 Oct 2026 11:42:56 +0100
+Subject: [PATCH 02/40] Map NBA 2K14 ET_SCE_EXEC at its linked addresses
+
+---
+ src/core/module.cpp | 77 ++++++++++++++++++++++++++++++++++++++++-----
+ src/core/module.h   |  3 +-
+ 2 files changed, 72 insertions(+), 8 deletions(-)
+
+diff --git a/src/core/module.cpp b/src/core/module.cpp
+index fb4e596f..e8fd4546 100644
+--- a/src/core/module.cpp
++++ b/src/core/module.cpp
+@@ -1,6 +1,8 @@
+ // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <limits>
++#include "common/elf_info.h"
+ #include "common/alignment.h"
+ #include "common/arch.h"
+ #include "common/assert.h"
+@@ -16,6 +18,10 @@
+ #include "core/memory.h"
+ #include "core/linker.h"
+ #include "core/module.h"
++#ifdef ENABLE_NBA_2K14_COMPATIBILITY
++#include "core/nba_2k14_compatibility.h"
++#include "core/signals.h"
++#endif
+ #include "core/tls.h"
+ 
+ namespace Core {
+@@ -40,6 +46,29 @@ static u64 CalculateBaseSize(const elf_header& ehdr, std::span<const elf_program
+     return base_size;
+ }
+ 
++#ifdef ENABLE_NBA_2K14_COMPATIBILITY
++static u64 CalculateImageStart(const elf_header& ehdr,
++                               std::span<const elf_program_header> phdr) {
++    u64 image_start = std::numeric_limits<u64>::max();
++    for (u16 i = 0; i < ehdr.e_phnum; i++) {
++        if (phdr[i].p_memsz != 0 &&
++            (phdr[i].p_type == PT_LOAD || phdr[i].p_type == PT_SCE_RELRO)) {
++            image_start = std::min(phdr[i].p_vaddr, image_start);
++        }
++    }
++    return image_start;
++}
++
++static bool IsNba2K14Eboot(std::string_view module_name) {
++    return module_name == "eboot.bin" &&
++           Nba2K14Compatibility::IsTitle(Common::ElfInfo::Instance().Title());
++}
++
++static bool ShouldMapFixedAddress(const elf_header& ehdr, std::string_view module_name) {
++    return ehdr.e_type == ET_SCE_EXEC && IsNba2K14Eboot(module_name);
++}
++#endif
++
+ static std::string EncodeId(u64 nVal) {
+     std::string enc;
+     static constexpr std::string_view codes =
+@@ -126,26 +155,60 @@ void Module::LoadModuleToMemory(u32& max_tls_index) {
+     const u64 base_size = CalculateBaseSize(elf_header, elf_pheader);
+     aligned_base_size = Common::AlignUp(base_size, BlockAlign);
+ 
++#ifdef ENABLE_NBA_2K14_COMPATIBILITY
++    const bool is_nba_2k14_eboot = IsNba2K14Eboot(name);
++    const bool map_fixed_address = ShouldMapFixedAddress(elf_header, name);
++    const u64 image_start =
++        map_fixed_address ? CalculateImageStart(elf_header, elf_pheader) : 0;
++    ASSERT_MSG(!map_fixed_address || image_start != std::numeric_limits<u64>::max(),
++               "Fixed-address executable {} has no loadable segments", name);
++
++    const VAddr requested_mapping_addr = map_fixed_address ? image_start : ModuleLoadBase;
++    const u64 mapped_image_size =
++        map_fixed_address ? aligned_base_size - image_start : aligned_base_size;
++    void* mapped_addr = std::bit_cast<void*>(requested_mapping_addr);
++    const auto mapping_flags =
++        map_fixed_address ? MemoryMapFlags::Fixed | MemoryMapFlags::NoOverwrite
++                          : MemoryMapFlags::NoFlags;
++#else
++    static constexpr bool is_nba_2k14_eboot = false;
++    static constexpr bool map_fixed_address = false;
++    const u64 mapped_image_size = aligned_base_size;
++    void* mapped_addr = std::bit_cast<void*>(ModuleLoadBase);
++    const auto mapping_flags = MemoryMapFlags::NoFlags;
++#endif
++
+     // Reserve memory area for module
+-    void** out_addr = reinterpret_cast<void**>(&base_virtual_addr);
+-    s32 result =
+-        memory->MapMemory(out_addr, ModuleLoadBase, aligned_base_size + TrampolineSize,
+-                          MemoryProt::NoAccess, MemoryMapFlags::NoFlags, VMAType::Reserved, name);
++    s32 result = memory->MapMemory(&mapped_addr, std::bit_cast<VAddr>(mapped_addr),
++                                   mapped_image_size + TrampolineSize, MemoryProt::NoAccess,
++                                   mapping_flags, VMAType::Reserved, name);
+     ASSERT_MSG(result == ORBIS_OK, "Failed to reserve memory for module {}", name);
+-    LOG_INFO(Core_Linker, "Loading module {} to {}", name, fmt::ptr(*out_addr));
++    mapped_virtual_addr = std::bit_cast<VAddr>(mapped_addr);
++    base_virtual_addr = map_fixed_address ? 0 : mapped_virtual_addr;
++    LOG_INFO(Core_Linker, "Loading module {} to {}", name, fmt::ptr(mapped_addr));
++#ifdef ENABLE_NBA_2K14_COMPATIBILITY
++    if (map_fixed_address) {
++        LOG_WARNING(Core_Linker,
++                    "NBA 2K14 compatibility: mapping fixed ET_SCE_EXEC image at linked "
++                    "addresses [{:#x}, {:#x}) for {} {}",
++                    image_start, aligned_base_size, Common::ElfInfo::Instance().GameSerial(),
++                    Common::ElfInfo::Instance().AppVer());
++    }
++#endif
+ 
+ #ifdef ARCH_X86_64
+     // Initialize trampoline generator.
+-    VAddr trampoline_vaddr = base_virtual_addr + aligned_base_size;
++    VAddr trampoline_vaddr = mapped_virtual_addr + mapped_image_size;
+     void* trampoline_addr = std::bit_cast<void*>(trampoline_vaddr);
+     result = memory->MapMemory(&trampoline_addr, trampoline_vaddr, TrampolineSize,
+                                MemoryProt::CpuReadWrite | MemoryProt::CpuExec,
+                                MemoryMapFlags::Fixed, VMAType::Code, name);
+     ASSERT_MSG(result == ORBIS_OK, "Failed to map trampoline area for module {}", name);
+-    RegisterPatchModule(*out_addr, aligned_base_size, trampoline_addr, TrampolineSize);
++    RegisterPatchModule(mapped_addr, mapped_image_size, trampoline_addr, TrampolineSize);
+ #endif
+ 
+     LOG_INFO(Core_Linker, "======== Load Module to Memory ========");
++    LOG_INFO(Core_Linker, "mapped_virtual_addr ....: {:#018x}", mapped_virtual_addr);
+     LOG_INFO(Core_Linker, "base_virtual_addr ......: {:#018x}", base_virtual_addr);
+     LOG_INFO(Core_Linker, "base_size ..............: {:#018x}", base_size);
+     LOG_INFO(Core_Linker, "aligned_base_size ......: {:#018x}", aligned_base_size);
+diff --git a/src/core/module.h b/src/core/module.h
+index 8dde0f46..a38e7b93 100644
+--- a/src/core/module.h
++++ b/src/core/module.h
+@@ -158,7 +158,7 @@ public:
+     }
+ 
+     bool IsValid() const noexcept {
+-        return base_virtual_addr != 0;
++        return mapped_virtual_addr != 0;
+     }
+ 
+     bool IsSharedLib() const noexcept {
+@@ -227,6 +227,7 @@ public:
+     std::filesystem::path file;
+     std::string name;
+     Loader::Elf elf;
++    VAddr mapped_virtual_addr{};
+     u64 aligned_base_size{};
+     VAddr base_virtual_addr{};
+     VAddr proc_param_virtual_addr{};

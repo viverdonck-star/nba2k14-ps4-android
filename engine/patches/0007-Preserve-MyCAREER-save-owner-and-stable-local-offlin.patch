@@ -1,0 +1,185 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 offline port <nba2k14-offline@localhost>
+Date: Fri, 30 Oct 2026 11:43:51 +0100
+Subject: [PATCH 07/40] Preserve MyCAREER save owner and stable local offline
+ identity
+
+---
+ src/core/libraries/np/np_manager.cpp | 65 +++++++++++++++++++++++++---
+ src/core/module.cpp                  | 32 ++++++++++++++
+ 2 files changed, 91 insertions(+), 6 deletions(-)
+
+diff --git a/src/core/libraries/np/np_manager.cpp b/src/core/libraries/np/np_manager.cpp
+index 52524fad..a7f92bb0 100644
+--- a/src/core/libraries/np/np_manager.cpp
++++ b/src/core/libraries/np/np_manager.cpp
+@@ -10,6 +10,9 @@
+ 
+ #include <core/user_settings.h>
+ #include "common/elf_info.h"
++#ifdef ENABLE_NBA_2K14_COMPATIBILITY
++#include "core/nba_2k14_compatibility.h"
++#endif
+ #include "common/logging/log.h"
+ #include "core/emulator_settings.h"
+ #include "core/libraries/error_codes.h"
+@@ -527,12 +530,42 @@ s32 PS4_SYSV_ABI sceNpGetGamePresenceStatusA(Libraries::UserService::OrbisUserSe
+     return ORBIS_OK;
+ }
+ 
++// Local offline identity: cached profile identity, without network reachability or authentication.
++static std::string GetLocalHandle(Libraries::UserService::OrbisUserServiceUserId user_id) {
++#ifdef ENABLE_NBA_2K14_COMPATIBILITY
++    if (Core::Nba2K14Compatibility::IsTitle(Common::ElfInfo::Instance().Title())) {
++        if (const User* user = UserManagement.GetUserByID(user_id)) {
++            return user->shadnet_npid.empty() ? user->user_name : user->shadnet_npid;
++        }
++    }
++#endif
++    return {};
++}
++
++static u64 StableLocalAccountId(std::string_view handle) {
++    // Preserve the PC save-fix hash and seed for a run-stable, non-zero owner.
++    u64 hash = 1469598103934665603ULL;
++    for (const unsigned char c : handle) {
++        hash ^= c;
++        hash *= 1099511628211ULL;
++    }
++    return hash | 0x8000000000000000ULL;
++}
++
+ s32 PS4_SYSV_ABI sceNpGetAccountId(OrbisNpOnlineId* online_id, u64* account_id) {
+     LOG_DEBUG(Lib_NpManager, "called");
+     if (online_id == nullptr || account_id == nullptr) {
+         return ORBIS_NP_ERROR_INVALID_ARGUMENT;
+     }
+     if (!g_shadnet_enabled) {
++        const std::string requested(online_id->data, strnlen(online_id->data, sizeof(online_id->data)));
++        for (const User& user : UserManagement.GetAllUsers()) {
++            const std::string local = GetLocalHandle(user.user_id);
++            if (!local.empty() && local.substr(0, sizeof(online_id->data) - 1) == requested) {
++                *account_id = StableLocalAccountId(local);
++                return ORBIS_OK;
++            }
++        }
+         *account_id = 0;
+         return ORBIS_NP_ERROR_SIGNED_OUT;
+     }
+@@ -551,6 +584,11 @@ s32 PS4_SYSV_ABI sceNpGetAccountIdA(Libraries::UserService::OrbisUserServiceUser
+         return ORBIS_NP_ERROR_USER_NOT_FOUND;
+     }
+     if (!g_shadnet_enabled) {
++        const std::string local = GetLocalHandle(user_id);
++        if (!local.empty()) {
++            *account_id = StableLocalAccountId(local);
++            return ORBIS_OK;
++        }
+         *account_id = 0;
+         return ORBIS_NP_ERROR_SIGNED_OUT;
+     }
+@@ -569,7 +607,13 @@ s32 PS4_SYSV_ABI sceNpGetNpId(Libraries::UserService::OrbisUserServiceUserId use
+         return ORBIS_NP_ERROR_USER_NOT_FOUND;
+     }
+     if (!g_shadnet_enabled) {
+-        return ORBIS_NP_ERROR_SIGNED_OUT;
++        const std::string local = GetLocalHandle(user_id);
++        if (local.empty()) {
++            return ORBIS_NP_ERROR_SIGNED_OUT;
++        }
++        std::memset(np_id, 0, sizeof(OrbisNpId));
++        std::strncpy(np_id->handle.data, local.c_str(), sizeof(np_id->handle.data) - 1);
++        return ORBIS_OK;
+     }
+     memset(np_id, 0, sizeof(OrbisNpId));
+     strncpy(np_id->handle.data, user->user_name.c_str(), sizeof(np_id->handle.data) - 1);
+@@ -587,7 +631,13 @@ s32 PS4_SYSV_ABI sceNpGetOnlineId(Libraries::UserService::OrbisUserServiceUserId
+         return ORBIS_NP_ERROR_USER_NOT_FOUND;
+     }
+     if (!g_shadnet_enabled) {
+-        return ORBIS_NP_ERROR_SIGNED_OUT;
++        const std::string local = GetLocalHandle(user_id);
++        if (local.empty()) {
++            return ORBIS_NP_ERROR_SIGNED_OUT;
++        }
++        std::memset(online_id, 0, sizeof(OrbisNpOnlineId));
++        std::strncpy(online_id->data, local.c_str(), sizeof(online_id->data) - 1);
++        return ORBIS_OK;
+     }
+     memset(online_id, 0, sizeof(OrbisNpOnlineId));
+     strncpy(online_id->data, user->user_name.c_str(), sizeof(online_id->data) - 1);
+@@ -628,8 +678,8 @@ s32 PS4_SYSV_ABI sceNpGetState(Libraries::UserService::OrbisUserServiceUserId us
+         }
+     }
+     if (!g_shadnet_enabled) {
+-        *state = OrbisNpState::SignedOut;
+-        LOG_DEBUG(Lib_NpManager, "shadNet disabled,SignedOut");
++        *state = GetLocalHandle(user_id).empty() ? OrbisNpState::SignedOut : OrbisNpState::SignedIn;
++        LOG_DEBUG(Lib_NpManager, "Offline NP state {}", static_cast<int>(*state));
+         return ORBIS_OK;
+     }
+     *state = Libraries::Np::NpHandler::GetInstance().IsPsnSignedIn(user_id)
+@@ -745,7 +795,9 @@ static void QueueNpStateEvent(Libraries::UserService::OrbisUserServiceUserId use
+     event.state = state;
+     event.has_np_id = state == OrbisNpState::SignedIn;
+     if (event.has_np_id) {
+-        std::strncpy(event.np_id.handle.data, user->user_name.c_str(),
++        const std::string local = GetLocalHandle(user_id);
++        const std::string& handle = local.empty() ? user->user_name : local;
++        std::strncpy(event.np_id.handle.data, handle.c_str(),
+                      sizeof(event.np_id.handle.data) - 1);
+     }
+ 
+@@ -758,7 +810,8 @@ void NotifyNpStateFromUserServiceEvent(Libraries::UserService::OrbisUserServiceE
+     switch (event_type) {
+     case Libraries::UserService::OrbisUserServiceEventType::Login:
+         QueueNpStateEvent(user_id,
+-                          g_shadnet_enabled ? OrbisNpState::SignedIn : OrbisNpState::SignedOut);
++                          (g_shadnet_enabled || !GetLocalHandle(user_id).empty())
++                              ? OrbisNpState::SignedIn : OrbisNpState::SignedOut);
+         break;
+     case Libraries::UserService::OrbisUserServiceEventType::Logout:
+         QueueNpStateEvent(user_id, OrbisNpState::SignedOut);
+diff --git a/src/core/module.cpp b/src/core/module.cpp
+index 8e242f9a..4bfe9d7b 100644
+--- a/src/core/module.cpp
++++ b/src/core/module.cpp
+@@ -339,6 +339,38 @@ void Module::LoadModuleToMemory(u32& max_tls_index) {
+         }
+     }
+ 
++#ifdef ENABLE_NBA_2K14_COMPATIBILITY
++    // Fixed-VA save-owner and NULLGUARD edits are known only for CUSA00104 v01.00.
++    // Check mapped file-backed executable ranges before reading any expected bytes.
++    const bool is_supported_offline_eboot = is_nba_2k14_eboot && map_fixed_address &&
++        Common::ElfInfo::Instance().GameSerial() == "CUSA00104" &&
++        Common::ElfInfo::Instance().AppVer() == "01.00";
++    const auto contains_code = [&](u64 address, size_t size) {
++        for (const auto& ph : elf_pheader) {
++            if ((ph.p_type == PT_LOAD || ph.p_type == PT_SCE_RELRO) &&
++                (ph.p_flags & PF_EXEC) != 0 && address >= ph.p_vaddr &&
++                size <= ph.p_filesz && address - ph.p_vaddr <= ph.p_filesz - size) {
++                return true;
++            }
++        }
++        return false;
++    };
++    if (is_supported_offline_eboot) {
++        // OnNewUser otherwise copies an empty offline login slot into the save owner.
++        constexpr u64 owner_va = 0xe6f8e4;
++        constexpr std::array<u8, 5> expected{0x4a, 0x8b, 0x44, 0x38, 0x40};
++        constexpr std::array<u8, 5> replacement{0xb8, 0x01, 0x00, 0x00, 0x00};
++        if (contains_code(owner_va, expected.size()) &&
++            std::memcmp(reinterpret_cast<const void*>(owner_va), expected.data(), expected.size()) == 0) {
++            ASSERT_MSG(WriteNba2K14CompatibilityBytes(owner_va, replacement),
++                       "NBA2K14: could not write save-owner patch");
++            LOG_INFO(Core_Linker, "NBA2K14: applied save-owner patch at {:#x}", owner_va);
++        } else {
++            LOG_ERROR(Core_Linker, "NBA2K14: save-owner patch site mismatch; not patching");
++        }
++    }
++#endif
++
+ #ifdef ENABLE_NBA_2K14_COMPATIBILITY
+     if (is_nba_2k14_eboot) {
+         std::vector<ExecutableMemoryRange> executable_ranges;

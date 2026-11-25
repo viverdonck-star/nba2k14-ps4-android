@@ -1,0 +1,662 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 offline port <nba2k14-offline@localhost>
+Date: Fri, 30 Oct 2026 11:42:56 +0100
+Subject: [PATCH 03/40] Port NGS2 rack and voice fallback with FEX allocator
+ callbacks
+
+---
+ src/core/libraries/ngs2/ngs2.cpp      |  77 +++--
+ src/core/libraries/ngs2/ngs2.h        |  24 ++
+ src/core/libraries/ngs2/ngs2_impl.cpp | 386 ++++++++++++++++++++++++++
+ src/core/libraries/ngs2/ngs2_impl.h   |   4 +
+ 4 files changed, 449 insertions(+), 42 deletions(-)
+
+diff --git a/src/core/libraries/ngs2/ngs2.cpp b/src/core/libraries/ngs2/ngs2.cpp
+index 97d19c35..dd4abe74 100644
+--- a/src/core/libraries/ngs2/ngs2.cpp
++++ b/src/core/libraries/ngs2/ngs2.cpp
+@@ -2,6 +2,9 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include "common/logging/log.h"
++#ifdef SHADPS4_ENABLE_FEX_GUEST_CPU
++#include "core/guest_cpu/guest_callback.h"
++#endif
+ #include "core/libraries/error_codes.h"
+ #include "core/libraries/libs.h"
+ #include "core/libraries/ngs2/ngs2.h"
+@@ -52,11 +55,7 @@ s32 PS4_SYSV_ABI sceNgs2RackCreate(OrbisNgs2Handle systemHandle, u32 rackId,
+                                    const OrbisNgs2ContextBufferInfo* bufferInfo,
+                                    OrbisNgs2Handle* outHandle) {
+     LOG_ERROR(Lib_Ngs2, "rackId = {}", rackId);
+-    if (!systemHandle) {
+-        LOG_ERROR(Lib_Ngs2, "systemHandle is nullptr");
+-        return ORBIS_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
+-    }
+-    return ORBIS_OK;
++    return Hle::RackCreate(systemHandle, rackId, option, bufferInfo, nullptr, outHandle);
+ }
+ 
+ s32 PS4_SYSV_ABI sceNgs2RackCreateWithAllocator(OrbisNgs2Handle systemHandle, u32 rackId,
+@@ -64,34 +63,30 @@ s32 PS4_SYSV_ABI sceNgs2RackCreateWithAllocator(OrbisNgs2Handle systemHandle, u3
+                                                 const OrbisNgs2BufferAllocator* allocator,
+                                                 OrbisNgs2Handle* outHandle) {
+     LOG_ERROR(Lib_Ngs2, "rackId = {}", rackId);
+-    if (!systemHandle) {
+-        LOG_ERROR(Lib_Ngs2, "systemHandle is nullptr");
+-        return ORBIS_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
+-    }
+-    return ORBIS_OK;
++    return Hle::RackCreateWithAllocator(systemHandle, rackId, option, allocator, outHandle);
+ }
+ 
+ s32 PS4_SYSV_ABI sceNgs2RackDestroy(OrbisNgs2Handle rackHandle,
+                                     OrbisNgs2ContextBufferInfo* outBufferInfo) {
+     LOG_ERROR(Lib_Ngs2, "called");
+-    return ORBIS_OK;
++    return Hle::RackDestroy(rackHandle, outBufferInfo);
+ }
+ 
+ s32 PS4_SYSV_ABI sceNgs2RackGetInfo(OrbisNgs2Handle rackHandle, OrbisNgs2RackInfo* outInfo,
+                                     size_t infoSize) {
+     LOG_ERROR(Lib_Ngs2, "infoSize = {}", infoSize);
+-    return ORBIS_OK;
++    return Hle::RackGetInfo(rackHandle, outInfo, infoSize);
+ }
+ 
+ s32 PS4_SYSV_ABI sceNgs2RackGetUserData(OrbisNgs2Handle rackHandle, uintptr_t* outUserData) {
+     LOG_ERROR(Lib_Ngs2, "called");
+-    return ORBIS_OK;
++    return Hle::RackGetUserData(rackHandle, outUserData);
+ }
+ 
+ s32 PS4_SYSV_ABI sceNgs2RackGetVoiceHandle(OrbisNgs2Handle rackHandle, u32 voiceIndex,
+                                            OrbisNgs2Handle* outHandle) {
+-    LOG_DEBUG(Lib_Ngs2, "(STUBBED) voiceIndex = {}", voiceIndex);
+-    return ORBIS_OK;
++    LOG_DEBUG(Lib_Ngs2, "voiceIndex = {}", voiceIndex);
++    return Hle::RackGetVoiceHandle(rackHandle, voiceIndex, outHandle);
+ }
+ 
+ s32 PS4_SYSV_ABI sceNgs2RackLock(OrbisNgs2Handle rackHandle) {
+@@ -102,12 +97,12 @@ s32 PS4_SYSV_ABI sceNgs2RackLock(OrbisNgs2Handle rackHandle) {
+ s32 PS4_SYSV_ABI sceNgs2RackQueryBufferSize(u32 rackId, const OrbisNgs2RackOption* option,
+                                             OrbisNgs2ContextBufferInfo* outBufferInfo) {
+     LOG_ERROR(Lib_Ngs2, "rackId = {}", rackId);
+-    return ORBIS_OK;
++    return RackQueryBufferSize(option, outBufferInfo);
+ }
+ 
+ s32 PS4_SYSV_ABI sceNgs2RackSetUserData(OrbisNgs2Handle rackHandle, uintptr_t userData) {
+     LOG_ERROR(Lib_Ngs2, "userData = {}", userData);
+-    return ORBIS_OK;
++    return Hle::RackSetUserData(rackHandle, userData);
+ }
+ 
+ s32 PS4_SYSV_ABI sceNgs2RackUnlock(OrbisNgs2Handle rackHandle) {
+@@ -156,17 +151,27 @@ s32 PS4_SYSV_ABI sceNgs2SystemCreateWithAllocator(const OrbisNgs2SystemOption* o
+         OrbisNgs2BufferAllocHandler hostAlloc = allocator->allocHandler;
+         if (outHandle) {
+             OrbisNgs2BufferFreeHandler hostFree = allocator->freeHandler;
+-            OrbisNgs2ContextBufferInfo bufferInfo;
++            OrbisNgs2ContextBufferInfo bufferInfo{};
+             result = SystemSetup(option, &bufferInfo, 0, 0);
+             if (result >= 0) {
+-                uintptr_t sysUserData = allocator->userData;
+-                result = hostAlloc(&bufferInfo);
++                bufferInfo.userData = allocator->userData;
++                #ifdef SHADPS4_ENABLE_FEX_GUEST_CPU
++result = static_cast<s32>(Core::GuestCpu::RunGuestFunctionOrAbort(
++    reinterpret_cast<const void*>(hostAlloc), "NGS2 system callback", &bufferInfo));
++#else
++result = hostAlloc(&bufferInfo);
++#endif
+                 if (result >= 0) {
+                     OrbisNgs2Handle* handleCopy = outHandle;
+                     result = SystemSetup(option, &bufferInfo, hostFree, handleCopy);
+                     if (result < 0) {
+                         if (hostFree) {
+-                            hostFree(&bufferInfo);
++                            #ifdef SHADPS4_ENABLE_FEX_GUEST_CPU
++static_cast<s32>(Core::GuestCpu::RunGuestFunctionOrAbort(
++    reinterpret_cast<const void*>(hostFree), "NGS2 system callback", &bufferInfo));
++#else
++hostFree(&bufferInfo);
++#endif
+                         }
+                     }
+                 }
+@@ -249,12 +254,8 @@ s32 PS4_SYSV_ABI sceNgs2SystemQueryBufferSize(const OrbisNgs2SystemOption* optio
+ s32 PS4_SYSV_ABI sceNgs2SystemRender(OrbisNgs2Handle systemHandle,
+                                      const OrbisNgs2RenderBufferInfo* aBufferInfo,
+                                      u32 numBufferInfo) {
+-    LOG_DEBUG(Lib_Ngs2, "(STUBBED) numBufferInfo = {}", numBufferInfo);
+-    if (!systemHandle) {
+-        LOG_ERROR(Lib_Ngs2, "systemHandle is nullptr");
+-        return ORBIS_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
+-    }
+-    return ORBIS_OK;
++    LOG_DEBUG(Lib_Ngs2, "silent HLE numBufferInfo = {}", numBufferInfo);
++    return Hle::SystemRenderSilent(systemHandle, aBufferInfo, numBufferInfo);
+ }
+ 
+ static s32 PS4_SYSV_ABI sceNgs2SystemResetOption(OrbisNgs2SystemOption* outOption) {
+@@ -309,8 +310,8 @@ s32 PS4_SYSV_ABI sceNgs2SystemUnlock(OrbisNgs2Handle systemHandle) {
+ 
+ s32 PS4_SYSV_ABI sceNgs2VoiceControl(OrbisNgs2Handle voiceHandle,
+                                      const OrbisNgs2VoiceParamHeader* paramList) {
+-    LOG_ERROR(Lib_Ngs2, "called");
+-    return ORBIS_OK;
++    LOG_DEBUG(Lib_Ngs2, "called");
++    return Hle::VoiceControl(voiceHandle, paramList);
+ }
+ 
+ s32 PS4_SYSV_ABI sceNgs2VoiceGetMatrixInfo(OrbisNgs2Handle voiceHandle, u32 matrixId,
+@@ -322,7 +323,7 @@ s32 PS4_SYSV_ABI sceNgs2VoiceGetMatrixInfo(OrbisNgs2Handle voiceHandle, u32 matr
+ s32 PS4_SYSV_ABI sceNgs2VoiceGetOwner(OrbisNgs2Handle voiceHandle, OrbisNgs2Handle* outRackHandle,
+                                       u32* outVoiceId) {
+     LOG_ERROR(Lib_Ngs2, "called");
+-    return ORBIS_OK;
++    return Hle::VoiceGetOwner(voiceHandle, outRackHandle, outVoiceId);
+ }
+ 
+ s32 PS4_SYSV_ABI sceNgs2VoiceGetPortInfo(OrbisNgs2Handle voiceHandle, u32 port,
+@@ -334,12 +335,12 @@ s32 PS4_SYSV_ABI sceNgs2VoiceGetPortInfo(OrbisNgs2Handle voiceHandle, u32 port,
+ s32 PS4_SYSV_ABI sceNgs2VoiceGetState(OrbisNgs2Handle voiceHandle, OrbisNgs2VoiceState* outState,
+                                       size_t stateSize) {
+     LOG_ERROR(Lib_Ngs2, "stateSize = {}", stateSize);
+-    return ORBIS_OK;
++    return Hle::VoiceGetState(voiceHandle, outState, stateSize);
+ }
+ 
+ s32 PS4_SYSV_ABI sceNgs2VoiceGetStateFlags(OrbisNgs2Handle voiceHandle, u32* outStateFlags) {
+     LOG_ERROR(Lib_Ngs2, "called");
+-    return ORBIS_OK;
++    return Hle::VoiceGetStateFlags(voiceHandle, outStateFlags);
+ }
+ 
+ // Ngs2Custom
+@@ -396,20 +397,12 @@ s32 PS4_SYSV_ABI sceNgs2PanGetVolumeMatrix(OrbisNgs2PanWork* work, const OrbisNg
+ s32 PS4_SYSV_ABI sceNgs2ReportRegisterHandler(u32 reportType, OrbisNgs2ReportHandler handler,
+                                               uintptr_t userData, OrbisNgs2Handle* outHandle) {
+     LOG_INFO(Lib_Ngs2, "reportType = {}, userData = {}", reportType, userData);
+-    if (!handler) {
+-        LOG_ERROR(Lib_Ngs2, "handler is nullptr");
+-        return ORBIS_NGS2_ERROR_INVALID_REPORT_HANDLE;
+-    }
+-    return ORBIS_OK;
++    return Hle::ReportRegister(reinterpret_cast<uintptr_t>(handler), outHandle);
+ }
+ 
+ s32 PS4_SYSV_ABI sceNgs2ReportUnregisterHandler(OrbisNgs2Handle reportHandle) {
+-    if (!reportHandle) {
+-        LOG_ERROR(Lib_Ngs2, "reportHandle is nullptr");
+-        return ORBIS_NGS2_ERROR_INVALID_REPORT_HANDLE;
+-    }
+     LOG_INFO(Lib_Ngs2, "called");
+-    return ORBIS_OK;
++    return Hle::ReportUnregister(reportHandle);
+ }
+ 
+ // Unknown
+diff --git a/src/core/libraries/ngs2/ngs2.h b/src/core/libraries/ngs2/ngs2.h
+index 4a5724d0..fd0a14e5 100644
+--- a/src/core/libraries/ngs2/ngs2.h
++++ b/src/core/libraries/ngs2/ngs2.h
+@@ -269,6 +269,30 @@ struct OrbisNgs2VoiceState {
+     u32 stateFlags;
+ };
+ 
++namespace Hle {
++
++s32 RackCreate(OrbisNgs2Handle systemHandle, u32 rackId, const OrbisNgs2RackOption* option,
++               const OrbisNgs2ContextBufferInfo* bufferInfo, OrbisNgs2BufferFreeHandler freeHandler,
++               OrbisNgs2Handle* outHandle);
++s32 RackCreateWithAllocator(OrbisNgs2Handle systemHandle, u32 rackId,
++                            const OrbisNgs2RackOption* option,
++                            const OrbisNgs2BufferAllocator* allocator, OrbisNgs2Handle* outHandle);
++s32 RackDestroy(OrbisNgs2Handle rackHandle, OrbisNgs2ContextBufferInfo* outBufferInfo);
++s32 RackGetInfo(OrbisNgs2Handle rackHandle, OrbisNgs2RackInfo* outInfo, size_t infoSize);
++s32 RackGetUserData(OrbisNgs2Handle rackHandle, uintptr_t* outUserData);
++s32 RackGetVoiceHandle(OrbisNgs2Handle rackHandle, u32 voiceIndex, OrbisNgs2Handle* outHandle);
++s32 RackSetUserData(OrbisNgs2Handle rackHandle, uintptr_t userData);
++s32 SystemRenderSilent(OrbisNgs2Handle systemHandle, const OrbisNgs2RenderBufferInfo* bufferInfo,
++                       u32 numBufferInfo);
++s32 VoiceControl(OrbisNgs2Handle voiceHandle, const OrbisNgs2VoiceParamHeader* paramList);
++s32 VoiceGetOwner(OrbisNgs2Handle voiceHandle, OrbisNgs2Handle* outRackHandle, u32* outVoiceId);
++s32 VoiceGetState(OrbisNgs2Handle voiceHandle, OrbisNgs2VoiceState* outState, size_t stateSize);
++s32 VoiceGetStateFlags(OrbisNgs2Handle voiceHandle, u32* outStateFlags);
++s32 ReportRegister(uintptr_t handler, OrbisNgs2Handle* outHandle);
++s32 ReportUnregister(OrbisNgs2Handle reportHandle);
++
++} // namespace Hle
++
+ void RegisterLib(Core::Loader::SymbolsResolver* sym);
+ 
+ } // namespace Libraries::Ngs2
+diff --git a/src/core/libraries/ngs2/ngs2_impl.cpp b/src/core/libraries/ngs2/ngs2_impl.cpp
+index 141ac41b..e5a5a8af 100644
+--- a/src/core/libraries/ngs2/ngs2_impl.cpp
++++ b/src/core/libraries/ngs2/ngs2_impl.cpp
+@@ -1,10 +1,22 @@
+ // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include "ngs2.h"
+ #include "ngs2_error.h"
+ #include "ngs2_impl.h"
+ 
++#include <atomic>
++#include <cstring>
++#include <limits>
++#include <mutex>
++#include <new>
++#include <unordered_map>
++#include <vector>
++
+ #include "common/logging/log.h"
++#ifdef SHADPS4_ENABLE_FEX_GUEST_CPU
++#include "core/guest_cpu/guest_callback.h"
++#endif
+ #include "core/libraries/error_codes.h"
+ #include "core/libraries/kernel/kernel.h"
+ 
+@@ -12,6 +24,75 @@ using namespace Libraries::Kernel;
+ 
+ namespace Libraries::Ngs2 {
+ 
++namespace {
++
++// NGS2 allocators are guest x86-64 callbacks, never native ARM64 function pointers.
++template <typename Handler>
++s32 InvokeBufferHandler(Handler handler, OrbisNgs2ContextBufferInfo* info) {
++#ifdef SHADPS4_ENABLE_FEX_GUEST_CPU
++    return static_cast<s32>(Core::GuestCpu::RunGuestFunctionOrAbort(
++        reinterpret_cast<const void*>(handler), "NGS2 buffer callback", info));
++#else
++    return handler(info);
++#endif
++}
++
++constexpr u32 RackHandleType = 2;
++constexpr u32 VoiceHandleType = 4;
++constexpr u32 DefaultMaxVoices = 1;
++constexpr u32 MaxHleVoices = 4096;
++
++struct RackState {
++    OrbisNgs2Handle systemHandle{};
++    u32 rackId{};
++    u32 maxVoices{};
++    uintptr_t userData{};
++    OrbisNgs2ContextBufferInfo bufferInfo{};
++    OrbisNgs2BufferFreeHandler freeHandler{};
++    std::vector<OrbisNgs2Handle> voiceHandles;
++};
++
++struct VoiceState {
++    OrbisNgs2Handle rackHandle{};
++    u32 voiceIndex{};
++    u32 stateFlags{};
++};
++
++std::mutex hleStateMutex;
++std::unordered_map<OrbisNgs2Handle, RackState> rackStates;
++std::unordered_map<OrbisNgs2Handle, VoiceState> voiceStates;
++std::unordered_map<OrbisNgs2Handle, uintptr_t> reportStates;
++std::atomic<OrbisNgs2Handle> nextReportHandle{0x10008};
++
++u32 GetMaxVoices(const OrbisNgs2RackOption* option) {
++    return option ? option->maxVoices : DefaultMaxVoices;
++}
++
++size_t GetRackBufferSize(const OrbisNgs2RackOption* option) {
++    const u32 maxVoices = GetMaxVoices(option);
++    if (maxVoices > MaxHleVoices) {
++        return 0;
++    }
++
++    constexpr size_t handleSize = sizeof(HandleInternal);
++    const size_t handleCount = static_cast<size_t>(maxVoices) + 1;
++    if (handleCount > std::numeric_limits<size_t>::max() / handleSize) {
++        return 0;
++    }
++    return handleCount * handleSize;
++}
++
++void InitializeHandle(HandleInternal* handle, u32 type, u32 id) {
++    new (handle) HandleInternal{};
++    handle->selfPtr = handle;
++    handle->systemData = nullptr;
++    handle->refCount.store(1, std::memory_order_relaxed);
++    handle->handleType = type;
++    handle->handleID = id;
++}
++
++} // namespace
++
+ s32 HandleReportInvalid(OrbisNgs2Handle handle, u32 handleType) {
+     switch (handleType) {
+     case 1:
+@@ -184,4 +265,309 @@ s32 SystemSetup(const OrbisNgs2SystemOption* option, OrbisNgs2ContextBufferInfo*
+     return ORBIS_NGS2_ERROR_INVALID_BUFFER_SIZE;
+ }
+ 
++s32 RackQueryBufferSize(const OrbisNgs2RackOption* option,
++                        OrbisNgs2ContextBufferInfo* outBufferInfo) {
++    if (!outBufferInfo) {
++        return ORBIS_NGS2_ERROR_INVALID_BUFFER_ADDRESS;
++    }
++    if (option && option->size < sizeof(OrbisNgs2RackOption)) {
++        return ORBIS_NGS2_ERROR_INVALID_OPTION_SIZE;
++    }
++
++    const size_t requiredBufferSize = GetRackBufferSize(option);
++    if (requiredBufferSize == 0) {
++        return ORBIS_NGS2_ERROR_INVALID_MAX_VOICES;
++    }
++
++    outBufferInfo->hostBuffer = nullptr;
++    outBufferInfo->hostBufferSize = requiredBufferSize;
++    MemoryClear(outBufferInfo->reserved, sizeof(outBufferInfo->reserved));
++    return ORBIS_OK;
++}
++
++namespace Hle {
++
++s32 RackCreate(OrbisNgs2Handle systemHandle, u32 rackId, const OrbisNgs2RackOption* option,
++               const OrbisNgs2ContextBufferInfo* bufferInfo, OrbisNgs2BufferFreeHandler freeHandler,
++               OrbisNgs2Handle* outHandle) {
++    if (!systemHandle) {
++        return ORBIS_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
++    }
++    if (!outHandle) {
++        return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
++    }
++    if (!bufferInfo) {
++        return ORBIS_NGS2_ERROR_INVALID_BUFFER_INFO;
++    }
++
++    OrbisNgs2ContextBufferInfo queryInfo{};
++    const s32 queryResult = RackQueryBufferSize(option, &queryInfo);
++    if (queryResult < 0) {
++        return queryResult;
++    }
++    if (!bufferInfo->hostBuffer) {
++        return ORBIS_NGS2_ERROR_INVALID_BUFFER_ADDRESS;
++    }
++    if (reinterpret_cast<uintptr_t>(bufferInfo->hostBuffer) % alignof(HandleInternal) != 0) {
++        return ORBIS_NGS2_ERROR_INVALID_BUFFER_ALIGN;
++    }
++    if (bufferInfo->hostBufferSize < queryInfo.hostBufferSize) {
++        return ORBIS_NGS2_ERROR_INVALID_BUFFER_SIZE;
++    }
++
++    const u32 maxVoices = GetMaxVoices(option);
++    auto* handles = static_cast<HandleInternal*>(bufferInfo->hostBuffer);
++    InitializeHandle(&handles[0], RackHandleType, rackId);
++    const OrbisNgs2Handle rackHandle = reinterpret_cast<OrbisNgs2Handle>(&handles[0]);
++
++    RackState rackState{};
++    rackState.systemHandle = systemHandle;
++    rackState.rackId = rackId;
++    rackState.maxVoices = maxVoices;
++    rackState.userData = bufferInfo->userData;
++    rackState.bufferInfo = *bufferInfo;
++    rackState.freeHandler = freeHandler;
++    rackState.voiceHandles.reserve(maxVoices);
++
++    for (u32 voiceIndex = 0; voiceIndex < maxVoices; ++voiceIndex) {
++        HandleInternal* voice = &handles[static_cast<size_t>(voiceIndex) + 1];
++        InitializeHandle(voice, VoiceHandleType, voiceIndex);
++        rackState.voiceHandles.push_back(reinterpret_cast<OrbisNgs2Handle>(voice));
++    }
++
++    {
++        std::scoped_lock lock{hleStateMutex};
++        if (rackStates.contains(rackHandle)) {
++            return ORBIS_NGS2_ERROR_BUFFER_BROKEN;
++        }
++        for (u32 voiceIndex = 0; voiceIndex < maxVoices; ++voiceIndex) {
++            voiceStates.emplace(rackState.voiceHandles[voiceIndex],
++                                VoiceState{rackHandle, voiceIndex, 0});
++        }
++        rackStates.emplace(rackHandle, std::move(rackState));
++    }
++
++    *outHandle = rackHandle;
++    return ORBIS_OK;
++}
++
++s32 RackCreateWithAllocator(OrbisNgs2Handle systemHandle, u32 rackId,
++                            const OrbisNgs2RackOption* option,
++                            const OrbisNgs2BufferAllocator* allocator, OrbisNgs2Handle* outHandle) {
++    if (!systemHandle) {
++        return ORBIS_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
++    }
++    if (!outHandle) {
++        return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
++    }
++    if (!allocator || !allocator->allocHandler) {
++        return ORBIS_NGS2_ERROR_INVALID_BUFFER_ALLOCATOR;
++    }
++
++    OrbisNgs2ContextBufferInfo bufferInfo{};
++    const s32 queryResult = RackQueryBufferSize(option, &bufferInfo);
++    if (queryResult < 0) {
++        return queryResult;
++    }
++    bufferInfo.userData = allocator->userData;
++
++    const s32 allocResult = InvokeBufferHandler(allocator->allocHandler, &bufferInfo);
++    if (allocResult < 0) {
++        return allocResult;
++    }
++
++    const s32 setupResult =
++        RackCreate(systemHandle, rackId, option, &bufferInfo, allocator->freeHandler, outHandle);
++    if (setupResult < 0 && allocator->freeHandler && bufferInfo.hostBuffer) {
++        InvokeBufferHandler(allocator->freeHandler, &bufferInfo);
++    }
++    return setupResult;
++}
++
++s32 RackDestroy(OrbisNgs2Handle rackHandle, OrbisNgs2ContextBufferInfo* outBufferInfo) {
++    RackState rackState{};
++    {
++        std::scoped_lock lock{hleStateMutex};
++        const auto rackIt = rackStates.find(rackHandle);
++        if (rackIt == rackStates.end()) {
++            return ORBIS_NGS2_ERROR_INVALID_RACK_HANDLE;
++        }
++        rackState = std::move(rackIt->second);
++        for (const OrbisNgs2Handle voiceHandle : rackState.voiceHandles) {
++            voiceStates.erase(voiceHandle);
++        }
++        rackStates.erase(rackIt);
++    }
++
++    if (outBufferInfo) {
++        *outBufferInfo = rackState.bufferInfo;
++    }
++    if (rackState.freeHandler) {
++        return InvokeBufferHandler(rackState.freeHandler, &rackState.bufferInfo);
++    }
++    return ORBIS_OK;
++}
++
++s32 RackGetInfo(OrbisNgs2Handle rackHandle, OrbisNgs2RackInfo* outInfo, size_t infoSize) {
++    if (!outInfo) {
++        return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
++    }
++    if (infoSize < sizeof(OrbisNgs2RackInfo)) {
++        return ORBIS_NGS2_ERROR_INVALID_OUT_SIZE;
++    }
++
++    std::scoped_lock lock{hleStateMutex};
++    const auto rackIt = rackStates.find(rackHandle);
++    if (rackIt == rackStates.end()) {
++        return ORBIS_NGS2_ERROR_INVALID_RACK_HANDLE;
++    }
++
++    std::memset(outInfo, 0, sizeof(OrbisNgs2RackInfo));
++    outInfo->rackHandle = rackHandle;
++    outInfo->bufferInfo = rackIt->second.bufferInfo;
++    outInfo->ownerSystemHandle = rackIt->second.systemHandle;
++    outInfo->rackId = rackIt->second.rackId;
++    outInfo->maxVoices = rackIt->second.maxVoices;
++    return ORBIS_OK;
++}
++
++s32 RackGetUserData(OrbisNgs2Handle rackHandle, uintptr_t* outUserData) {
++    if (!outUserData) {
++        return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
++    }
++    std::scoped_lock lock{hleStateMutex};
++    const auto rackIt = rackStates.find(rackHandle);
++    if (rackIt == rackStates.end()) {
++        return ORBIS_NGS2_ERROR_INVALID_RACK_HANDLE;
++    }
++    *outUserData = rackIt->second.userData;
++    return ORBIS_OK;
++}
++
++s32 RackGetVoiceHandle(OrbisNgs2Handle rackHandle, u32 voiceIndex, OrbisNgs2Handle* outHandle) {
++    if (!outHandle) {
++        return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
++    }
++    std::scoped_lock lock{hleStateMutex};
++    const auto rackIt = rackStates.find(rackHandle);
++    if (rackIt == rackStates.end()) {
++        return ORBIS_NGS2_ERROR_INVALID_RACK_HANDLE;
++    }
++    if (voiceIndex >= rackIt->second.voiceHandles.size()) {
++        return ORBIS_NGS2_ERROR_INVALID_VOICE_INDEX;
++    }
++    *outHandle = rackIt->second.voiceHandles[voiceIndex];
++    return ORBIS_OK;
++}
++
++s32 RackSetUserData(OrbisNgs2Handle rackHandle, uintptr_t userData) {
++    std::scoped_lock lock{hleStateMutex};
++    const auto rackIt = rackStates.find(rackHandle);
++    if (rackIt == rackStates.end()) {
++        return ORBIS_NGS2_ERROR_INVALID_RACK_HANDLE;
++    }
++    rackIt->second.userData = userData;
++    return ORBIS_OK;
++}
++
++s32 SystemRenderSilent(OrbisNgs2Handle systemHandle, const OrbisNgs2RenderBufferInfo* bufferInfo,
++                       u32 numBufferInfo) {
++    if (!systemHandle) {
++        return ORBIS_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
++    }
++    if (numBufferInfo > 0 && !bufferInfo) {
++        return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
++    }
++    for (u32 index = 0; index < numBufferInfo; ++index) {
++        if (bufferInfo[index].bufferSize > 0 && !bufferInfo[index].buffer) {
++            return ORBIS_NGS2_ERROR_INVALID_BUFFER_ADDRESS;
++        }
++        if (bufferInfo[index].buffer && bufferInfo[index].bufferSize > 0) {
++            std::memset(bufferInfo[index].buffer, 0, bufferInfo[index].bufferSize);
++        }
++    }
++    return ORBIS_OK;
++}
++
++s32 VoiceControl(OrbisNgs2Handle voiceHandle, const OrbisNgs2VoiceParamHeader* paramList) {
++    if (!paramList) {
++        return ORBIS_NGS2_ERROR_INVALID_VOICE_CONTROL_ADDRESS;
++    }
++    std::scoped_lock lock{hleStateMutex};
++    if (!voiceStates.contains(voiceHandle)) {
++        return ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE;
++    }
++    return ORBIS_OK;
++}
++
++s32 VoiceGetOwner(OrbisNgs2Handle voiceHandle, OrbisNgs2Handle* outRackHandle, u32* outVoiceId) {
++    if (!outRackHandle || !outVoiceId) {
++        return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
++    }
++    std::scoped_lock lock{hleStateMutex};
++    const auto voiceIt = voiceStates.find(voiceHandle);
++    if (voiceIt == voiceStates.end()) {
++        return ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE;
++    }
++    *outRackHandle = voiceIt->second.rackHandle;
++    *outVoiceId = voiceIt->second.voiceIndex;
++    return ORBIS_OK;
++}
++
++s32 VoiceGetState(OrbisNgs2Handle voiceHandle, OrbisNgs2VoiceState* outState, size_t stateSize) {
++    if (!outState) {
++        return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
++    }
++    if (stateSize < sizeof(OrbisNgs2VoiceState)) {
++        return ORBIS_NGS2_ERROR_INVALID_VOICE_STATE_SIZE;
++    }
++    std::scoped_lock lock{hleStateMutex};
++    const auto voiceIt = voiceStates.find(voiceHandle);
++    if (voiceIt == voiceStates.end()) {
++        return ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE;
++    }
++    std::memset(outState, 0, stateSize);
++    outState->stateFlags = voiceIt->second.stateFlags;
++    return ORBIS_OK;
++}
++
++s32 VoiceGetStateFlags(OrbisNgs2Handle voiceHandle, u32* outStateFlags) {
++    if (!outStateFlags) {
++        return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
++    }
++    std::scoped_lock lock{hleStateMutex};
++    const auto voiceIt = voiceStates.find(voiceHandle);
++    if (voiceIt == voiceStates.end()) {
++        return ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE;
++    }
++    *outStateFlags = voiceIt->second.stateFlags;
++    return ORBIS_OK;
++}
++
++s32 ReportRegister(uintptr_t handler, OrbisNgs2Handle* outHandle) {
++    if (!handler) {
++        return ORBIS_NGS2_ERROR_INVALID_REPORT_HANDLER;
++    }
++    if (!outHandle) {
++        return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
++    }
++    const OrbisNgs2Handle reportHandle = nextReportHandle.fetch_add(0x10);
++    {
++        std::scoped_lock lock{hleStateMutex};
++        reportStates.emplace(reportHandle, handler);
++    }
++    *outHandle = reportHandle;
++    return ORBIS_OK;
++}
++
++s32 ReportUnregister(OrbisNgs2Handle reportHandle) {
++    std::scoped_lock lock{hleStateMutex};
++    if (reportStates.erase(reportHandle) == 0) {
++        return ORBIS_NGS2_ERROR_INVALID_REPORT_HANDLE;
++    }
++    return ORBIS_OK;
++}
++
++} // namespace Hle
++
+ } // namespace Libraries::Ngs2
+diff --git a/src/core/libraries/ngs2/ngs2_impl.h b/src/core/libraries/ngs2/ngs2_impl.h
+index a433e84f..7f1b7ca4 100644
+--- a/src/core/libraries/ngs2/ngs2_impl.h
++++ b/src/core/libraries/ngs2/ngs2_impl.h
+@@ -176,4 +176,8 @@ s32 SystemCleanup(OrbisNgs2Handle systemHandle, OrbisNgs2ContextBufferInfo* outI
+ s32 SystemSetup(const OrbisNgs2SystemOption* option, OrbisNgs2ContextBufferInfo* hostBufferInfo,
+                 OrbisNgs2BufferFreeHandler hostFree, OrbisNgs2Handle* outHandle);
+ 
++struct OrbisNgs2RackOption;
++s32 RackQueryBufferSize(const OrbisNgs2RackOption* option,
++                        OrbisNgs2ContextBufferInfo* outBufferInfo);
++
+ } // namespace Libraries::Ngs2

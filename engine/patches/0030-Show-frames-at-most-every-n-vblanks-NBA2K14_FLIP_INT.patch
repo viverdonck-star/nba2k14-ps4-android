@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 Android port <nba2k14-android@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 18:54:48 +0100
+Subject: [PATCH 30/40] Show frames at most every n vblanks
+ (NBA2K14_FLIP_INTERVAL)
+
+Adds NBA2K14_FLIP_INTERVAL=<n>: shows a new frame at most every n
+vblanks (2 = 30 images/s) to spare the GPU and the heat.
+---
+ src/core/libraries/videoout/driver.cpp | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/src/core/libraries/videoout/driver.cpp b/src/core/libraries/videoout/driver.cpp
+index 7a23ae8c..95a36a03 100644
+--- a/src/core/libraries/videoout/driver.cpp
++++ b/src/core/libraries/videoout/driver.cpp
+@@ -1,6 +1,8 @@
+ // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <algorithm>
++#include <cstdlib>
+ #include "common/rdtsc.h"
+ #include <atomic>
+ #include <optional>
+@@ -442,7 +444,11 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
+         // Check if it's time to take a request.
+         auto& vblank_status = main_port.vblank_status;
+         ApplyDueLabelRetirement();
+-        if (vblank_status.count % (main_port.flip_rate + 1) == 0) {
++        static const u32 min_flip_interval = [] {
++            const char* value = std::getenv("NBA2K14_FLIP_INTERVAL");
++            return value ? std::max(std::atoi(value), 1) : 1;
++        }();
++        if (vblank_status.count % std::max<u32>(main_port.flip_rate + 1, min_flip_interval) == 0) {
+             const auto request = receive_request();
+             if (!request) {
+                 if (timer.GetTotalWait().count() < 0) { // Dont draw too fast

@@ -1,0 +1,96 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 Android port <nba2k14-android@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 18:54:48 +0100
+Subject: [PATCH 36/40] Cap host sample counts with NBA2K14_MSAA_MAX
+
+Adds NBA2K14_MSAA_MAX=<n>: caps host sample counts (the guest keeps its
+4x layout) and folds sample fetches into that range.
+---
+ .../backend/spirv/emit_spirv_image.cpp                |  7 +++++++
+ src/video_core/renderer_vulkan/liverpool_to_vk.cpp    | 11 +++++++++++
+ src/video_core/texture_cache/blit_helper.cpp          |  7 ++++++-
+ 3 files changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/src/shader_recompiler/backend/spirv/emit_spirv_image.cpp b/src/shader_recompiler/backend/spirv/emit_spirv_image.cpp
+index 87d03eef..c773ed67 100644
+--- a/src/shader_recompiler/backend/spirv/emit_spirv_image.cpp
++++ b/src/shader_recompiler/backend/spirv/emit_spirv_image.cpp
+@@ -5,6 +5,10 @@
+ #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
+ #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
+ 
++namespace Vulkan::LiverpoolToVK {
++u32 MsaaCap();
++}
++
+ namespace Shader::Backend::SPIRV {
+ 
+ struct ImageOperands {
+@@ -226,6 +230,9 @@ Id EmitImageGradient(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id
+ 
+ Id EmitImageRead(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id lod, Id ms) {
+     const auto& texture = ctx.images[handle & 0xFFFF];
++    if (Sirit::ValidId(ms) && Vulkan::LiverpoolToVK::MsaaCap() < 16) {
++        ms = ctx.OpBitwiseAnd(ctx.U32[1], ms, ctx.ConstU32(Vulkan::LiverpoolToVK::MsaaCap() - 1));
++    }
+     const Id color_type = texture.data_types->Get(4);
+     ImageOperands operands;
+     operands.Add(spv::ImageOperandsMask::Sample, ms);
+diff --git a/src/video_core/renderer_vulkan/liverpool_to_vk.cpp b/src/video_core/renderer_vulkan/liverpool_to_vk.cpp
+index bffe8b35..8c2fe86a 100644
+--- a/src/video_core/renderer_vulkan/liverpool_to_vk.cpp
++++ b/src/video_core/renderer_vulkan/liverpool_to_vk.cpp
+@@ -1,6 +1,8 @@
+ // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <algorithm>
++#include <cstdlib>
+ #include "common/assert.h"
+ #include "common/number_utils.h"
+ #include "video_core/amdgpu/pixel_format.h"
+@@ -1171,7 +1173,16 @@ vk::SampleCountFlagBits RawNumSamples(u32 num_samples) {
+     }
+ }
+ 
++u32 MsaaCap() {
++    static const u32 cap = [] {
++        const char* value = std::getenv("NBA2K14_MSAA_MAX");
++        return value ? std::max<u32>(std::atoi(value), 1) : 16U;
++    }();
++    return cap;
++}
++
+ vk::SampleCountFlagBits NumSamples(u32 num_samples, vk::SampleCountFlags supported_flags) {
++    num_samples = std::min(num_samples, MsaaCap());
+     vk::SampleCountFlagBits flags = RawNumSamples(num_samples);
+     // Half sample counts until supported, with a minimum of 1.
+     while (!(supported_flags & flags) && num_samples > 1) {
+diff --git a/src/video_core/texture_cache/blit_helper.cpp b/src/video_core/texture_cache/blit_helper.cpp
+index 6f0ff774..e9fbe40e 100644
+--- a/src/video_core/texture_cache/blit_helper.cpp
++++ b/src/video_core/texture_cache/blit_helper.cpp
+@@ -1,6 +1,7 @@
+ // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <algorithm>
+ #include "video_core/renderer_vulkan/vk_instance.h"
+ #include "video_core/renderer_vulkan/vk_scheduler.h"
+ #include "video_core/renderer_vulkan/vk_shader_util.h"
+@@ -11,10 +12,14 @@
+ #include "video_core/host_shaders/fs_tri_vert.h"
+ #include "video_core/host_shaders/ms_image_blit_frag.h"
+ 
++namespace Vulkan::LiverpoolToVK {
++u32 MsaaCap();
++}
++
+ namespace VideoCore {
+ 
+ static vk::SampleCountFlagBits ToSampleCount(u32 num_samples) {
+-    switch (num_samples) {
++    switch (std::min(num_samples, Vulkan::LiverpoolToVK::MsaaCap())) {
+     case 1:
+         return vk::SampleCountFlagBits::e1;
+     case 2:

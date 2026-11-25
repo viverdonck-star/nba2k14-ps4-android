@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14-offline-port <nba2k14-offline@localhost>
+Date: Fri, 30 Oct 2026 21:53:34 +0100
+Subject: [PATCH 10/40] Trace FEX HLE calls by host thread with optional full
+ tracing
+
+---
+ src/core/guest_cpu/fex_hle_bridge.cpp | 23 ++++++++++++++++++-----
+ 1 file changed, 18 insertions(+), 5 deletions(-)
+
+diff --git a/src/core/guest_cpu/fex_hle_bridge.cpp b/src/core/guest_cpu/fex_hle_bridge.cpp
+index 9362cb7c..1529d8da 100644
+--- a/src/core/guest_cpu/fex_hle_bridge.cpp
++++ b/src/core/guest_cpu/fex_hle_bridge.cpp
+@@ -9,11 +9,14 @@
+ #include <cstdio>
+ #include <cstdlib>
+ #include <mutex>
++#include <unistd.h>
++#include <pthread.h>
++#include <cstring>
+ 
+ namespace {
+ // Diagnostic cap: high enough to capture full boot + background-thread HLE activity
+ // (the 256 default truncated the trace before the game's Fios driver thread ran).
+-constexpr uint32_t HleTraceLimit = 100000;
++constexpr uint32_t HleTraceLimit = 3000000;
+ std::atomic_uint32_t HleTraceCount{};
+ 
+ thread_local Core::GuestCpu::HleCallFrame* ActiveHleCallFrame{};
+@@ -74,15 +77,25 @@ Fex::EngineResult<bool> HleGuestBridge::Invoke(HleCallFrame& frame) {
+     // on memcpy/lock HLE cut Driveclub 3D to 11-15 fps. After the window fills,
+     // skip the fetch_add so hot polling APIs do not contend on the counter.
+     static const bool trace_requested = BachataHleTraceRequested(std::getenv("BACHATA_FEX_HLE_TRACE"));
++    // NBA2K14_TRACE_SKIP: the main and audio threads flood the trace; skip them.
++    static thread_local int trace_skip = -1;
++    if (trace_requested && trace_skip < 0) {
++        char tname[32]{};
++        pthread_getname_np(pthread_self(), tname, sizeof(tname));
++        const char* trace_all = std::getenv("NBA2K14_TRACE_ALL");
++        trace_skip = (trace_all && trace_all[0] == '1') ? 0 : (std::strcmp(tname, "Thread2") == 0 || std::strcmp(tname, "Game:Main") == 0 ||
++                      std::strcmp(tname, "AudioThread") == 0 ||
++                      std::strcmp(tname, "VCAUDIO3_NGS2") == 0) ? 1 : 0;
++    }
+     auto trace_index = HleTraceCount.load(std::memory_order_relaxed);
+-    if (trace_requested && trace_index < HleTraceLimit) {
++    if (trace_requested && trace_skip == 0 && trace_index < HleTraceLimit) {
+         trace_index = HleTraceCount.fetch_add(1, std::memory_order_relaxed);
+     }
+-    const bool trace = trace_requested && trace_index < HleTraceLimit;
++    const bool trace = trace_requested && trace_skip == 0 && trace_index < HleTraceLimit;
+     if (trace) {
+         std::fprintf(stderr,
+-                     "BACHATA_FEX_HLE_BEGIN index=%u operation=%llu name=%.*s rsp=%#llx\n",
+-                     trace_index, static_cast<unsigned long long>(frame.operation),
++                     "BACHATA_FEX_HLE_BEGIN index=%u htid=%d operation=%llu name=%.*s rsp=%#llx\n",
++                     trace_index, static_cast<int>(gettid()), static_cast<unsigned long long>(frame.operation),
+                      static_cast<int>(adapter->Name().size()), adapter->Name().data(),
+                      static_cast<unsigned long long>(frame.rsp));
+     }

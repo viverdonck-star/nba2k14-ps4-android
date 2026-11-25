@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14-offline-port <nba2k14-offline@localhost>
+Date: Fri, 30 Oct 2026 22:19:13 +0100
+Subject: [PATCH 13/40] Add opt-in read-only NBA startup state diagnostics
+
+---
+ src/core/libraries/np/np_manager.cpp | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/src/core/libraries/np/np_manager.cpp b/src/core/libraries/np/np_manager.cpp
+index a7f92bb0..5817d738 100644
+--- a/src/core/libraries/np/np_manager.cpp
++++ b/src/core/libraries/np/np_manager.cpp
+@@ -3,6 +3,7 @@
+ 
+ #include <array>
+ #include <cctype>
++#include <cstdlib>
+ #include <deque>
+ #include <map>
+ #include <mutex>
+@@ -917,6 +918,23 @@ static void DispatchPendingNpStateCallbacks() {
+ 
+ s32 PS4_SYSV_ABI sceNpCheckCallback() {
+     LOG_DEBUG(Lib_NpManager, "(STUBBED) called");
++#ifdef ENABLE_NBA_2K14_COMPATIBILITY
++    static const bool loading_diag = std::getenv("NBA2K14_LOADING_DIAG") != nullptr;
++    static thread_local unsigned loading_tick{};
++    if (loading_diag && Common::ElfInfo::Instance().GameSerial() == "CUSA00104" &&
++        Common::ElfInfo::Instance().AppVer() == "01.00" && ++loading_tick % 300 == 0) {
++        // Read-only observations of the fixed-VA 01.00 trophy state machine.
++        const auto read32 = [](uintptr_t address) {
++            return *reinterpret_cast<volatile const u32*>(address);
++        };
++        LOG_INFO(Lib_NpManager,
++                 "NBA2K14_LOADING trophy_state={} next={} flags={:#x} request={} queue={} guard={} user0={} login_state={} login_prev={} login_flags={:#x}",
++                 read32(0x1c99778), read32(0x1c9977c), read32(0x1c99780),
++                 read32(0x1c9978c), read32(0x1c997ac),
++                 static_cast<unsigned>(*reinterpret_cast<volatile const u8*>(0x25519d8)),
++                 read32(0x2767bc0), read32(0x1c2a254), read32(0x1c2a250), read32(0x1c2a2a0));
++    }
++#endif
+     DispatchPendingNpStateCallbacks();
+ 
+     std::scoped_lock lk{g_np_callbacks_mutex};

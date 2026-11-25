@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 Android port <nba2k14-android@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 18:54:48 +0100
+Subject: [PATCH 27/40] Add an opt-in per-second frame log (NBA2K14_PERF)
+
+Adds NBA2K14_PERF=1: logs once per second the new game frames shown,
+the repeated frames and the longest gap.
+---
+ .../renderer_vulkan/vk_presenter.cpp          | 27 +++++++++++++++++++
+ 1 file changed, 27 insertions(+)
+
+diff --git a/src/video_core/renderer_vulkan/vk_presenter.cpp b/src/video_core/renderer_vulkan/vk_presenter.cpp
+index bd730f55..f85eabf6 100644
+--- a/src/video_core/renderer_vulkan/vk_presenter.cpp
++++ b/src/video_core/renderer_vulkan/vk_presenter.cpp
+@@ -27,6 +27,7 @@
+ #include <array>
+ #include <atomic>
+ #include <cctype>
++#include <cstdlib>
+ #include <chrono>
+ #include <cmath>
+ #include <csetjmp>
+@@ -1202,6 +1203,32 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
+     }
+ 
+     free_frame();
++    static const bool perf_log = std::getenv("NBA2K14_PERF") != nullptr;
++    if (perf_log) {
++        using Clock = std::chrono::steady_clock;
++        static auto window_start = Clock::now();
++        static auto last_new = window_start;
++        static u32 new_frames = 0;
++        static u32 repeats = 0;
++        static s64 worst_ms = 0;
++        const auto now = Clock::now();
++        if (is_reusing_frame) {
++            ++repeats;
++        } else {
++            ++new_frames;
++            worst_ms = std::max<s64>(
++                worst_ms,
++                std::chrono::duration_cast<std::chrono::milliseconds>(now - last_new).count());
++            last_new = now;
++        }
++        if (now - window_start >= std::chrono::seconds(1)) {
++            LOG_INFO(Render_Vulkan, "NBA2K14_PERF fps={} repeats={} worst_ms={}", new_frames, repeats,
++                     worst_ms);
++            window_start = now;
++            new_frames = repeats = 0;
++            worst_ms = 0;
++        }
++    }
+     if (!is_reusing_frame) {
+         DebugState.IncFlipFrameNum();
+     }

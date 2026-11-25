@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 Android port <nba2k14-android@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 18:54:48 +0100
+Subject: [PATCH 40/40] Pace new frames on Android display ticks
+ (NBA2K14_FLIP_SYNC)
+
+Adds NBA2K14_FLIP_SYNC=1: new frames wait for a tick from the Android
+screen instead of NBA2K14_FLIP_MS's own clock.
+---
+ src/core/libraries/videoout/driver.cpp          |  5 ++++-
+ src/video_core/renderer_vulkan/vk_presenter.cpp | 17 +++++++++++++++++
+ src/video_core/renderer_vulkan/vk_presenter.h   |  2 ++
+ 3 files changed, 23 insertions(+), 1 deletion(-)
+
+diff --git a/src/core/libraries/videoout/driver.cpp b/src/core/libraries/videoout/driver.cpp
+index cf8d4142..dc9693ba 100644
+--- a/src/core/libraries/videoout/driver.cpp
++++ b/src/core/libraries/videoout/driver.cpp
+@@ -470,7 +470,10 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
+                     const char* value = std::getenv("NBA2K14_FLIP_MS");
+                     return std::chrono::milliseconds(value ? std::atoi(value) : 0);
+                 }();
+-                if (min_flip_time.count() > 0) {
++                static const bool flip_sync = std::getenv("NBA2K14_FLIP_SYNC") != nullptr;
++                const bool on_tick = flip_sync && min_flip_time.count() > 0 &&
++                                     Vulkan::WaitDisplayTick(int(min_flip_time.count()) * 2);
++                if (min_flip_time.count() > 0 && !on_tick) {
+                     using Clock = std::chrono::steady_clock;
+                     static auto next_flip = Clock::now();
+                     std::this_thread::sleep_until(next_flip);
+diff --git a/src/video_core/renderer_vulkan/vk_presenter.cpp b/src/video_core/renderer_vulkan/vk_presenter.cpp
+index b82f51de..a70efd39 100644
+--- a/src/video_core/renderer_vulkan/vk_presenter.cpp
++++ b/src/video_core/renderer_vulkan/vk_presenter.cpp
+@@ -2,6 +2,7 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <fcntl.h>
++#include <poll.h>
+ #include <sys/mman.h>
+ #include <sys/socket.h>
+ #include <sys/uio.h>
+@@ -219,6 +220,18 @@ public:
+         slot = (slot + 1) % kFrameSlots;
+     }
+ 
++    bool WaitTick(int limit_ms) {
++        if (socket_fd < 0) {
++            return false;
++        }
++        pollfd item{socket_fd, POLLIN, 0};
++        if (poll(&item, 1, limit_ms) <= 0 || !(item.revents & POLLIN)) {
++            return false;
++        }
++        char ticks[64];
++        return recv(socket_fd, ticks, sizeof(ticks), MSG_DONTWAIT) > 0;
++    }
++
+ private:
+     FrameExport() : path{std::getenv("NBA2K14_FRAME_SOCKET")} {}
+ 
+@@ -279,6 +292,10 @@ private:
+ };
+ } // namespace
+ 
++bool WaitDisplayTick(int limit_ms) {
++    return FrameExport::Get().Enabled() && FrameExport::Get().WaitTick(limit_ms);
++}
++
+ static std::string SanitizeFilenameComponent(std::string value) {
+     for (char& c : value) {
+         const unsigned char uc = static_cast<unsigned char>(c);
+diff --git a/src/video_core/renderer_vulkan/vk_presenter.h b/src/video_core/renderer_vulkan/vk_presenter.h
+index 614b9b77..6116a766 100644
+--- a/src/video_core/renderer_vulkan/vk_presenter.h
++++ b/src/video_core/renderer_vulkan/vk_presenter.h
+@@ -136,4 +136,6 @@ private:
+     std::vector<VAddr> vo_buffers_addr;
+ };
+ 
++bool WaitDisplayTick(int limit_ms);
++
+ } // namespace Vulkan

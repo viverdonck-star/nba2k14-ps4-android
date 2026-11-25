@@ -1,0 +1,90 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14-offline-port <nba2k14-offline@localhost>
+Date: Sat, 31 Oct 2026 07:21:41 +0100
+Subject: [PATCH 18/40] Match upstream image mip and slice pitch validation
+
+---
+ src/video_core/texture_cache/image_info.cpp | 36 +++++++++++++--------
+ 1 file changed, 22 insertions(+), 14 deletions(-)
+
+diff --git a/src/video_core/texture_cache/image_info.cpp b/src/video_core/texture_cache/image_info.cpp
+index 40b58af9..74111295 100644
+--- a/src/video_core/texture_cache/image_info.cpp
++++ b/src/video_core/texture_cache/image_info.cpp
+@@ -224,6 +224,7 @@ void ImageInfo::UpdateSize() {
+     }
+ }
+ 
++// NBA2K14_UPSTREAM_MIPOF: MipOf/SliceOf from shadPS4 57e4da03 (pitch must match).
+ s32 ImageInfo::MipOf(const ImageInfo& info) const {
+     if (!IsCompatible(info)) {
+         return -1;
+@@ -233,11 +234,14 @@ s32 ImageInfo::MipOf(const ImageInfo& info) const {
+         return -1;
+     }
+ 
+-    // Currently we expect only on level to be copied.
++    // Currently we expect only one level to be copied.
+     if (resources.levels != 1) {
+         return -1;
+     }
+ 
++    const auto info_dim = info.props.is_block ? 2 : 0;
++    const auto this_dim = props.is_block ? 2 : 0;
++
+     // Find mip
+     auto mip = -1;
+     for (auto m = 0; m < info.resources.levels; ++m) {
+@@ -246,7 +250,8 @@ s32 ImageInfo::MipOf(const ImageInfo& info) const {
+         const VAddr mip_end = mip_base + mip_size;
+         const u32 slice_size = mip_size / info.resources.layers;
+         if (guest_address >= mip_base && guest_address < mip_end &&
+-            (guest_address - mip_base) % slice_size == 0) {
++            (guest_address - mip_base) % slice_size == 0 &&
++            (pitch >> this_dim) == (mip_pitch >> info_dim)) {
+             mip = m;
+             break;
+         }
+@@ -256,13 +261,12 @@ s32 ImageInfo::MipOf(const ImageInfo& info) const {
+         return -1;
+     }
+ 
+-    const auto curr_block_dim = BlockDim();
+-    const auto info_block_dim = info.BlockDim();
+-
+     // 2D block dimensions of both images should be the same.
+-    const auto mip_w = std::max(info_block_dim.width >> mip, 1u);
+-    const auto mip_h = std::max(info_block_dim.height >> mip, 1u);
+-    if ((curr_block_dim.width != mip_w) || (curr_block_dim.height != mip_h)) {
++    const auto mip_w = std::max(info.size.width >> (mip + info_dim), 1u);
++    const auto mip_h = std::max(info.size.height >> (mip + info_dim), 1u);
++    const auto this_w = std::max(size.width >> this_dim, 1u);
++    const auto this_h = std::max(size.height >> this_dim, 1u);
++    if ((this_w != mip_w) || (this_h != mip_h)) {
+         return -1;
+     }
+ 
+@@ -291,13 +295,17 @@ s32 ImageInfo::SliceOf(const ImageInfo& info, s32 mip) const {
+         return -1;
+     }
+ 
+-    const auto curr_block_dim = BlockDim();
+-    const auto info_block_dim = info.BlockDim();
+-
+     // 2D block dimensions of both images should be the same.
+-    const auto mip_w = std::max(info_block_dim.width >> mip, 1u);
+-    const auto mip_h = std::max(info_block_dim.height >> mip, 1u);
+-    if ((curr_block_dim.width != mip_w) || (curr_block_dim.height != mip_h)) {
++    const auto info_dim = info.props.is_block ? 2 : 0;
++    const auto mip_w = std::max(info.size.width >> (mip + info_dim), 1u);
++    const auto mip_h = std::max(info.size.height >> (mip + info_dim), 1u);
++    const auto mip_p = std::max(info.mips_layout[mip].pitch >> info_dim, 1u);
++
++    const auto this_dim = props.is_block ? 2 : 0;
++    const auto this_w = std::max(size.width >> this_dim, 1u);
++    const auto this_h = std::max(size.height >> this_dim, 1u);
++    const auto this_p = std::max(pitch >> this_dim, 1u);
++    if ((this_w != mip_w) || (this_h != mip_h) || (this_p != mip_p)) {
+         return -1;
+     }
+ 

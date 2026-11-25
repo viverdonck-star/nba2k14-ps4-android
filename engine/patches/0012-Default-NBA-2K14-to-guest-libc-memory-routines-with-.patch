@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14-offline-port <nba2k14-offline@localhost>
+Date: Fri, 30 Oct 2026 21:54:48 +0100
+Subject: [PATCH 12/40] Default NBA 2K14 to guest libc memory routines with
+ environment override
+
+---
+ src/core/libraries/libc_internal/libc_internal.cpp | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/src/core/libraries/libc_internal/libc_internal.cpp b/src/core/libraries/libc_internal/libc_internal.cpp
+index 14cd74b8..78181711 100644
+--- a/src/core/libraries/libc_internal/libc_internal.cpp
++++ b/src/core/libraries/libc_internal/libc_internal.cpp
+@@ -1,7 +1,9 @@
+ // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <cstdlib>
+ #include <common/va_ctx.h>
++#include "common/elf_info.h"
+ #include "common/assert.h"
+ #include "common/logging/log.h"
+ #include "core/libraries/error_codes.h"
+@@ -29,7 +31,16 @@ void ForceRegisterLib(Core::Loader::SymbolsResolver* sym) {
+     // Used to forcibly enable HLEs for broken LLE functions.
+     ForceRegisterlibSceLibcInternalIo(sym);
+ #ifdef SHADPS4_ENABLE_FEX_GUEST_CPU
+-    RegisterFexLibcMemoryAliases(sym);
++    // NBA2K14_HLE_MEMORY=0: keep the game's own libc memcpy/memset/memcmp (millions of tiny calls
++    // made the HLE bridge crossing the bottleneck during NBA 2K14 save/datastore setup).
++    const char* memory_override = std::getenv("NBA2K14_HLE_MEMORY");
++    const bool use_memory_hle = memory_override ? memory_override[0] != '0'
++        : Common::ElfInfo::Instance().GameSerial() != "CUSA00104";
++    if (use_memory_hle) {
++        RegisterFexLibcMemoryAliases(sym);
++    } else {
++        LOG_WARNING(Lib_LibcInternal, "NBA2K14: libc memcpy/memset/memcmp HLE aliases disabled");
++    }
+     RegisterFexLibcMathAliases(sym);
+     RegisterFexLibcStrAliases(sym);
+     RegisterFexLibcCxaAliases(sym);

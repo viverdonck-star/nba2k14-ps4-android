@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 Android port <nba2k14-android@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 18:54:48 +0100
+Subject: [PATCH 31/40] Count long frame gaps and swapchain waits with
+ NBA2K14_PERF
+
+Extends NBA2K14_PERF: counts long frame gaps and times swapchain
+acquire and present, to locate the hitches.
+---
+ .../renderer_vulkan/vk_presenter.cpp          | 33 ++++++++++++++++---
+ 1 file changed, 29 insertions(+), 4 deletions(-)
+
+diff --git a/src/video_core/renderer_vulkan/vk_presenter.cpp b/src/video_core/renderer_vulkan/vk_presenter.cpp
+index ad791125..fdcc259b 100644
+--- a/src/video_core/renderer_vulkan/vk_presenter.cpp
++++ b/src/video_core/renderer_vulkan/vk_presenter.cpp
+@@ -946,7 +946,18 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
+         swapchain.Recreate(window.GetWidth(), window.GetHeight());
+     }
+ 
+-    if (!swapchain.AcquireNextImage()) {
++    static s64 perf_acquire_us = 0, perf_acquire_max = 0, perf_present_us = 0, perf_present_max = 0;
++    const auto perf_us_since = [](std::chrono::steady_clock::time_point begin) {
++        return std::chrono::duration_cast<std::chrono::microseconds>(
++                   std::chrono::steady_clock::now() - begin)
++            .count();
++    };
++    const auto perf_acquire_begin = std::chrono::steady_clock::now();
++    const bool perf_acquired = swapchain.AcquireNextImage();
++    const s64 perf_acquire_time = perf_us_since(perf_acquire_begin);
++    perf_acquire_us += perf_acquire_time;
++    perf_acquire_max = std::max(perf_acquire_max, perf_acquire_time);
++    if (!perf_acquired) {
+         swapchain.Recreate(window.GetWidth(), window.GetHeight());
+         if (!swapchain.AcquireNextImage()) {
+             // User resizes the window too fast and GPU can't keep up. Skip this frame.
+@@ -1194,7 +1205,11 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
+     // Present to swapchain.
+     {
+         std::scoped_lock submit_lock{Scheduler::submit_mutex};
++        const auto perf_present_begin = std::chrono::steady_clock::now();
+         const bool presented = swapchain.Present();
++        const s64 perf_present_time = perf_us_since(perf_present_begin);
++        perf_present_us += perf_present_time;
++        perf_present_max = std::max(perf_present_max, perf_present_time);
+         if (trace) {
+             LOG_INFO(Render_Vulkan, "BACHATA_PRESENT_TRACE id={} stage=present_done ok={}", trace_id,
+                      presented);
+@@ -1213,14 +1228,17 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
+         static u32 new_frames = 0;
+         static u32 repeats = 0;
+         static s64 worst_ms = 0;
++        static u32 gaps_over_30 = 0, gaps_over_50 = 0;
+         const auto now = Clock::now();
+         if (is_reusing_frame) {
+             ++repeats;
+         } else {
+             ++new_frames;
+-            worst_ms = std::max<s64>(
+-                worst_ms,
+-                std::chrono::duration_cast<std::chrono::milliseconds>(now - last_new).count());
++            const s64 gap_ms =
++                std::chrono::duration_cast<std::chrono::milliseconds>(now - last_new).count();
++            worst_ms = std::max<s64>(worst_ms, gap_ms);
++            gaps_over_50 += gap_ms > 50;
++            gaps_over_30 += gap_ms > 30;
+             last_new = now;
+         }
+         if (now - window_start >= std::chrono::seconds(1)) {
+@@ -1245,6 +1263,13 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
+                      delta[2], delta[3], delta[4], delta[5]);
+             last_tsc = tsc;
+             last_real = now;
++            LOG_INFO(Render_Vulkan,
++                     "NBA2K14_HITCH over30={} over50={} acquire_ms={} acquire_max={} present_ms={} "
++                     "present_max={}",
++                     gaps_over_30, gaps_over_50, perf_acquire_us / 1000, perf_acquire_max / 1000,
++                     perf_present_us / 1000, perf_present_max / 1000);
++            gaps_over_30 = gaps_over_50 = 0;
++            perf_acquire_us = perf_acquire_max = perf_present_us = perf_present_max = 0;
+             window_start = now;
+             new_frames = repeats = 0;
+             worst_ms = 0;

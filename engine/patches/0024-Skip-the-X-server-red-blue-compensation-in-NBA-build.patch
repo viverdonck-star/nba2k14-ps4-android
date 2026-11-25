@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 Android port <nba2k14-android@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 18:54:48 +0100
+Subject: [PATCH 24/40] Skip the X server red/blue compensation in NBA builds
+
+The R/B compensation in GetFrameViewFormat targets Bachata's embedded X
+server. Termux:X11 shows the
+guest frame as is, so with it NBA 2K14 appears with red and blue
+swapped on the real screen.
+---
+ src/video_core/renderer_vulkan/vk_presenter.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/video_core/renderer_vulkan/vk_presenter.cpp b/src/video_core/renderer_vulkan/vk_presenter.cpp
+index 5b3a1e67..bd730f55 100644
+--- a/src/video_core/renderer_vulkan/vk_presenter.cpp
++++ b/src/video_core/renderer_vulkan/vk_presenter.cpp
+@@ -680,7 +680,7 @@ Frame* Presenter::PrepareLastFrame() {
+ }
+ 
+ static vk::Format GetFrameViewFormat(const Libraries::VideoOut::PixelFormat format) {
+-#ifdef ENABLE_BACHATA_RUNTIME
++#if defined(ENABLE_BACHATA_RUNTIME) && !defined(ENABLE_NBA_2K14_COMPATIBILITY)
+     // The embedded X11 server's DRI3 path exposes the guest frame with the opposite R/B
+     // memory order from desktop WSI. Compensate in the sampled image view.
+     switch (format) {

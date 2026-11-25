@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 Android port <nba2k14-android@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 18:54:48 +0100
+Subject: [PATCH 29/40] Report the real guest timestamp rate instead of a
+ scaled one
+
+FEX scales a slow guest rdtsc up to 1 GHz (19.2 MHz x 64 here) while
+sceKernelGetTscFrequency reports the real 19.2 MHz,
+so a game reading rdtsc directly sees time run 64 times too fast. Keeps
+rdtsc at the frequency the engine reports.
+---
+ src/core/fex/fex_guest_engine.cpp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/core/fex/fex_guest_engine.cpp b/src/core/fex/fex_guest_engine.cpp
+index 2271f97c..be4d9a87 100644
+--- a/src/core/fex/fex_guest_engine.cpp
++++ b/src/core/fex/fex_guest_engine.cpp
+@@ -259,6 +259,7 @@ public:
+       FEXCore::Config::Load();
+       FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, "1");
+       FEXCore::Config::Set(FEXCore::Config::CONFIG_DISABLETELEMETRY, "1");
++      FEXCore::Config::Set(FEXCore::Config::CONFIG_SMALLTSCSCALE, "0");
+       const bool traceEnabled = std::getenv("BACHATA_FEX_TRACE") != nullptr;
+       FEXCore::Config::Set(FEXCore::Config::CONFIG_X86DISASSEMBLE,
+                            traceEnabled ? "1" : "0");

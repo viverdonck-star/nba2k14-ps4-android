@@ -1,0 +1,174 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 Android port <nba2k14-android@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 18:54:48 +0100
+Subject: [PATCH 28/40] Log vblank, audio and guest clock counters with
+ NBA2K14_PERF
+
+Extends NBA2K14_PERF: each second, logs vblanks, audio buffers, the
+guest's clock calls and the TSC against real time.
+---
+ src/common/rdtsc.cpp                          |  2 ++
+ src/common/rdtsc.h                            |  4 ++++
+ src/core/libraries/audio/audioout.cpp         |  2 ++
+ src/core/libraries/kernel/time.cpp            |  5 +++++
+ src/core/libraries/videoout/driver.cpp        |  2 ++
+ .../renderer_vulkan/vk_presenter.cpp          | 21 +++++++++++++++++++
+ 6 files changed, 36 insertions(+)
+
+diff --git a/src/common/rdtsc.cpp b/src/common/rdtsc.cpp
+index 48d1b7a4..80e9d6e0 100644
+--- a/src/common/rdtsc.cpp
++++ b/src/common/rdtsc.cpp
+@@ -38,6 +38,8 @@ static u64 GetTimeNs() {
+ #endif
+ }
+ 
++std::atomic<u64> g_perf_counters[6];
++
+ u64 EstimateRDTSCFrequency() {
+     // Discard the first result measuring the rdtsc.
+     FencedRDTSC();
+diff --git a/src/common/rdtsc.h b/src/common/rdtsc.h
+index 4e4d5843..cd4bf783 100644
+--- a/src/common/rdtsc.h
++++ b/src/common/rdtsc.h
+@@ -3,6 +3,7 @@
+ 
+ #pragma once
+ 
++#include <atomic>
+ #include "common/arch.h"
+ 
+ #ifdef _MSC_VER
+@@ -51,4 +52,7 @@ static inline u64 FencedRDTSC() {
+ 
+ u64 EstimateRDTSCFrequency();
+ 
++// Diagnostic counters read by NBA2K14_PERF: vblank, audio, tsc, clock_gettime, ptc, gettimeofday.
++extern std::atomic<u64> g_perf_counters[6];
++
+ } // namespace Common
+diff --git a/src/core/libraries/audio/audioout.cpp b/src/core/libraries/audio/audioout.cpp
+index 2e28f7d8..f892c139 100644
+--- a/src/core/libraries/audio/audioout.cpp
++++ b/src/core/libraries/audio/audioout.cpp
+@@ -1,6 +1,7 @@
+ // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include "common/rdtsc.h"
+ #include <cstring>
+ #include <memory>
+ #include <mutex>
+@@ -180,6 +181,7 @@ static void AudioOutputThread(std::shared_ptr<PortOut> port, const std::stop_tok
+             if (port->output_ready) {
+                 port->impl->Output(port->output_buffer);
+                 port->output_ready = false;
++                Common::g_perf_counters[1].fetch_add(1, std::memory_order_relaxed);
+                 port->last_output_time =
+                     Kernel::sceKernelGetProcessTime(); // moved from sceAudioOutOutput TOOD recheck
+             }
+diff --git a/src/core/libraries/kernel/time.cpp b/src/core/libraries/kernel/time.cpp
+index cf120d63..2980645e 100644
+--- a/src/core/libraries/kernel/time.cpp
++++ b/src/core/libraries/kernel/time.cpp
+@@ -1,6 +1,7 @@
+ // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include "common/rdtsc.h"
+ #include <ctime>
+ #include <thread>
+ 
+@@ -43,6 +44,7 @@ u64 PS4_SYSV_ABI sceKernelGetProcessTime() {
+ }
+ 
+ u64 PS4_SYSV_ABI sceKernelGetProcessTimeCounter() {
++    Common::g_perf_counters[4].fetch_add(1, std::memory_order_relaxed);
+     return clock ? clock->GetUptime() - initial_ptc : 0;
+ }
+ 
+@@ -51,6 +53,7 @@ u64 PS4_SYSV_ABI sceKernelGetProcessTimeCounterFrequency() {
+ }
+ 
+ u64 PS4_SYSV_ABI sceKernelReadTsc() {
++    Common::g_perf_counters[2].fetch_add(1, std::memory_order_relaxed);
+     return clock ? clock->GetUptime() : 0;
+ }
+ 
+@@ -118,6 +121,7 @@ s32 PS4_SYSV_ABI sceKernelSleep(u32 seconds) {
+ }
+ 
+ s32 PS4_SYSV_ABI posix_clock_gettime(u32 clock_id, OrbisKernelTimespec* ts) {
++    Common::g_perf_counters[3].fetch_add(1, std::memory_order_relaxed);
+     if (ts == nullptr) {
+         SetPosixErrno(EFAULT);
+         return -1;
+@@ -395,6 +399,7 @@ s32 PS4_SYSV_ABI sceKernelClockGetres(const u32 clock_id, OrbisKernelTimespec* r
+ }
+ 
+ s32 PS4_SYSV_ABI posix_gettimeofday(OrbisKernelTimeval* tp, OrbisKernelTimezone* tz) {
++    Common::g_perf_counters[5].fetch_add(1, std::memory_order_relaxed);
+ #ifdef _WIN64
+     if (tp) {
+         FILETIME filetime;
+diff --git a/src/core/libraries/videoout/driver.cpp b/src/core/libraries/videoout/driver.cpp
+index df6df103..7a23ae8c 100644
+--- a/src/core/libraries/videoout/driver.cpp
++++ b/src/core/libraries/videoout/driver.cpp
+@@ -1,6 +1,7 @@
+ // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include "common/rdtsc.h"
+ #include <atomic>
+ #include <optional>
+ 
+@@ -481,6 +482,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
+ 
+             // Update vblank status
+             vblank_status.count++;
++            Common::g_perf_counters[0].fetch_add(1, std::memory_order_relaxed);
+             vblank_status.process_time = Libraries::Kernel::sceKernelGetProcessTime();
+             vblank_status.tsc = Libraries::Kernel::sceKernelReadTsc();
+             main_port.vblank_cv.notify_all();
+diff --git a/src/video_core/renderer_vulkan/vk_presenter.cpp b/src/video_core/renderer_vulkan/vk_presenter.cpp
+index f85eabf6..ad791125 100644
+--- a/src/video_core/renderer_vulkan/vk_presenter.cpp
++++ b/src/video_core/renderer_vulkan/vk_presenter.cpp
+@@ -6,7 +6,9 @@
+ #include "common/io_file.h"
+ #include "common/path_util.h"
+ #include "common/singleton.h"
++#include "common/rdtsc.h"
+ #include "core/debug_state.h"
++#include "core/libraries/kernel/time.h"
+ #include "core/devtools/layer.h"
+ #include "core/emulator_settings.h"
+ #include "core/libraries/system/systemservice.h"
+@@ -1224,6 +1226,25 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
+         if (now - window_start >= std::chrono::seconds(1)) {
+             LOG_INFO(Render_Vulkan, "NBA2K14_PERF fps={} repeats={} worst_ms={}", new_frames, repeats,
+                      worst_ms);
++            static u64 last[6]{};
++            static u64 last_tsc = Libraries::Kernel::sceKernelReadTsc();
++            static auto last_real = window_start;
++            u64 delta[6];
++            for (int i = 0; i < 6; ++i) {
++                const u64 value = Common::g_perf_counters[i].load(std::memory_order_relaxed);
++                delta[i] = value - last[i];
++                last[i] = value;
++            }
++            const u64 tsc = Libraries::Kernel::sceKernelReadTsc();
++            const double real_s = std::chrono::duration<double>(now - last_real).count();
++            const double tsc_s = double(tsc - last_tsc) / Libraries::Kernel::sceKernelGetTscFrequency();
++            LOG_INFO(Render_Vulkan,
++                     "NBA2K14_CLOCK real={:.3f} tsc={:.3f} tsc_hz={} vblank={} audio={} readtsc={} "
++                     "clock_gettime={} ptc={} gettimeofday={}",
++                     real_s, tsc_s, Libraries::Kernel::sceKernelGetTscFrequency(), delta[0], delta[1],
++                     delta[2], delta[3], delta[4], delta[5]);
++            last_tsc = tsc;
++            last_real = now;
+             window_start = now;
+             new_frames = repeats = 0;
+             worst_ms = 0;

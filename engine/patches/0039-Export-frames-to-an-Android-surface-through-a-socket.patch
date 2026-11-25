@@ -1,0 +1,309 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 Android port <nba2k14-android@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 18:54:48 +0100
+Subject: [PATCH 39/40] Export frames to an Android surface through a socket
+
+Adds NBA2K14_FRAME_SOCKET=<path>: runs without X11 (SDL offscreen,
+Vulkan headless surface) and hands each frame to the
+Android app through a shared memfd. Without the variable nothing
+changes.
+---
+ src/sdl_window.cpp                            |  17 +-
+ .../renderer_vulkan/vk_platform.cpp           |  14 ++
+ .../renderer_vulkan/vk_presenter.cpp          | 156 +++++++++++++++++-
+ 3 files changed, 183 insertions(+), 4 deletions(-)
+
+diff --git a/src/sdl_window.cpp b/src/sdl_window.cpp
+index 2b70c749..f38dffbb 100644
+--- a/src/sdl_window.cpp
++++ b/src/sdl_window.cpp
+@@ -1,6 +1,7 @@
+ // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <cstdlib>
+ #include <SDL3/SDL_events.h>
+ #include <SDL3/SDL_hints.h>
+ #include <SDL3/SDL_init.h>
+@@ -101,6 +102,10 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, Input::GameControllers* controller
+     if (!SDL_SetHint(SDL_HINT_APP_NAME, "shadPS4")) {
+         UNREACHABLE_MSG("Failed to set SDL window hint: {}", SDL_GetError());
+     }
++    const bool frame_export = std::getenv("NBA2K14_FRAME_SOCKET") != nullptr;
++    if (frame_export) {
++        SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
++    }
+     LOG_INFO(Input, "Initializing SDL video subsystem");
+     if (!SDL_Init(SDL_INIT_VIDEO)) {
+         UNREACHABLE_MSG("Failed to initialize SDL video subsystem: {}", SDL_GetError());
+@@ -113,7 +118,7 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, Input::GameControllers* controller
+ 
+ #ifdef ENABLE_NBA_2K14_COMPATIBILITY
+     // Termux:X11 has no window manager, so a fullscreen request alone leaves the default size.
+-    if (EmulatorSettings.IsFullScreen()) {
++    if (EmulatorSettings.IsFullScreen() && !frame_export) {
+         if (const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay())) {
+             width = mode->w;
+             height = mode->h;
+@@ -122,6 +127,11 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, Input::GameControllers* controller
+     }
+ #endif
+ 
++    if (frame_export) {
++        width = 1920;
++        height = 1080;
++    }
++
+     SDL_PropertiesID props = SDL_CreateProperties();
+     SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING,
+                           std::string(window_title).c_str());
+@@ -134,7 +144,8 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, Input::GameControllers* controller
+ #endif
+     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width);
+     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height);
+-    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, SDL_WINDOW_VULKAN);
++    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER,
++                          frame_export ? 0 : SDL_WINDOW_VULKAN);
+     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
+     LOG_INFO(Input, "Creating SDL Vulkan window");
+     window = SDL_CreateWindowWithProperties(props);
+@@ -161,7 +172,7 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, Input::GameControllers* controller
+         SDL_SetWindowFullscreenMode(
+             window, EmulatorSettings.GetFullScreenMode() == "Fullscreen" ? displayMode : NULL);
+     }
+-    SDL_SetWindowFullscreen(window, EmulatorSettings.IsFullScreen());
++    SDL_SetWindowFullscreen(window, EmulatorSettings.IsFullScreen() && !frame_export);
+     SDL_SyncWindow(window);
+ 
+ #ifndef ENABLE_BACHATA_RUNTIME
+diff --git a/src/video_core/renderer_vulkan/vk_platform.cpp b/src/video_core/renderer_vulkan/vk_platform.cpp
+index d10d921e..0f3e8423 100644
+--- a/src/video_core/renderer_vulkan/vk_platform.cpp
++++ b/src/video_core/renderer_vulkan/vk_platform.cpp
+@@ -13,6 +13,7 @@
+ #define VK_USE_PLATFORM_XLIB_KHR
+ #endif
+ 
++#include <cstdlib>
+ #include <vector>
+ #include <fmt/ranges.h>
+ 
+@@ -63,6 +64,15 @@ vk::SurfaceKHR CreateSurface(vk::Instance instance, const Frontend::WindowSDL& e
+     std::fprintf(stderr, "BACHATA_SURFACE_ENTER\n");
+     const auto& window_info = emu_window.GetWindowInfo();
+     vk::SurfaceKHR surface{};
++    if (std::getenv("NBA2K14_FRAME_SOCKET")) {
++        const vk::HeadlessSurfaceCreateInfoEXT headless_ci{};
++        if (instance.createHeadlessSurfaceEXT(&headless_ci, nullptr, &surface) !=
++            vk::Result::eSuccess) {
++            LOG_CRITICAL(Render_Vulkan, "Failed to initialize headless surface");
++            UNREACHABLE();
++        }
++        return surface;
++    }
+ 
+ #if defined(VK_USE_PLATFORM_WIN32_KHR)
+     if (window_info.type == Frontend::WindowSystemType::Windows) {
+@@ -172,6 +182,10 @@ std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window
+ 
+     switch (window_type) {
+     case Frontend::WindowSystemType::Headless:
++        if (std::getenv("NBA2K14_FRAME_SOCKET")) {
++            extensions.push_back(VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME);
++            extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
++        }
+         break;
+ #if defined(VK_USE_PLATFORM_WIN32_KHR)
+     case Frontend::WindowSystemType::Windows:
+diff --git a/src/video_core/renderer_vulkan/vk_presenter.cpp b/src/video_core/renderer_vulkan/vk_presenter.cpp
+index 641fa2d9..b82f51de 100644
+--- a/src/video_core/renderer_vulkan/vk_presenter.cpp
++++ b/src/video_core/renderer_vulkan/vk_presenter.cpp
+@@ -1,6 +1,12 @@
+ // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <sys/socket.h>
++#include <sys/uio.h>
++#include <sys/un.h>
++#include <unistd.h>
+ #include "common/debug.h"
+ #include "common/elf_info.h"
+ #include "common/io_file.h"
+@@ -158,6 +164,121 @@ struct ScreenshotReadback {
+           width{width_}, height{height_}, format{format_}, hdr_encoded{hdr_encoded_} {}
+ };
+ 
++
++namespace {
++// One message per connection, then one u32 slot per frame.
++struct FrameHeader {
++    u32 magic;
++    u32 width;
++    u32 height;
++    u32 stride;
++    u32 format;
++    u32 slots;
++};
++constexpr u32 kFrameMagic = 0x3146424e;
++constexpr u32 kFrameSlots = 3;
++
++class FrameExport {
++public:
++    static FrameExport& Get() {
++        static FrameExport instance;
++        return instance;
++    }
++
++    bool Enabled() const {
++        return path != nullptr;
++    }
++
++    ScreenshotReadback& Buffer(const Instance& instance, Scheduler& scheduler, u32 width,
++                               u32 height, vk::Format format) {
++        if (buffers.empty()) {
++            for (u32 i = 0; i < kFrameSlots; ++i) {
++                buffers.emplace_back(std::make_unique<ScreenshotReadback>(
++                    instance, scheduler, ScreenshotKind::GameOnly,
++                    std::vector<std::filesystem::path>{}, width, height, format, false));
++            }
++        }
++        return *buffers[slot];
++    }
++
++    void Publish() {
++        const auto& frame = *buffers[slot];
++        const u32 stride = frame.width * 4;
++        const u64 frame_size = u64(stride) * frame.height;
++        if (socket_fd < 0 && !Connect(frame, stride, frame_size)) {
++            slot = (slot + 1) % kFrameSlots;
++            return;
++        }
++        std::memcpy(shared + frame_size * slot, frame.buffer.mapped_data.data(), frame_size);
++        if (send(socket_fd, &slot, sizeof(slot), MSG_DONTWAIT | MSG_NOSIGNAL) < 0 &&
++            errno != EAGAIN) {
++            LOG_ERROR(Render_Vulkan, "NBA2K14 frame socket closed");
++            close(socket_fd);
++            socket_fd = -1;
++        }
++        slot = (slot + 1) % kFrameSlots;
++    }
++
++private:
++    FrameExport() : path{std::getenv("NBA2K14_FRAME_SOCKET")} {}
++
++    bool Connect(const ScreenshotReadback& frame, u32 stride, u64 frame_size) {
++        const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
++        sockaddr_un address{};
++        address.sun_family = AF_UNIX;
++        std::strncpy(address.sun_path, path, sizeof(address.sun_path) - 1);
++        if (fd < 0 || connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
++            if (fd >= 0) {
++                close(fd);
++            }
++            return false;
++        }
++        if (!shared) {
++            shared_fd = memfd_create("nba2k14-frames", 0);
++            if (shared_fd < 0 || ftruncate(shared_fd, off_t(frame_size * kFrameSlots)) != 0) {
++                close(fd);
++                return false;
++            }
++            void* memory = mmap(nullptr, frame_size * kFrameSlots, PROT_READ | PROT_WRITE,
++                                MAP_SHARED, shared_fd, 0);
++            if (memory == MAP_FAILED) {
++                close(fd);
++                return false;
++            }
++            shared = static_cast<u8*>(memory);
++        }
++        FrameHeader header = {kFrameMagic, frame.width, frame.height, stride,
++                              static_cast<u32>(frame.format), kFrameSlots};
++        iovec payload{&header, sizeof(header)};
++        alignas(cmsghdr) char control[CMSG_SPACE(sizeof(int))]{};
++        msghdr message{};
++        message.msg_iov = &payload;
++        message.msg_iovlen = 1;
++        message.msg_control = control;
++        message.msg_controllen = sizeof(control);
++        cmsghdr* item = CMSG_FIRSTHDR(&message);
++        item->cmsg_level = SOL_SOCKET;
++        item->cmsg_type = SCM_RIGHTS;
++        item->cmsg_len = CMSG_LEN(sizeof(int));
++        std::memcpy(CMSG_DATA(item), &shared_fd, sizeof(int));
++        if (sendmsg(fd, &message, MSG_NOSIGNAL) != sizeof(header)) {
++            close(fd);
++            return false;
++        }
++        socket_fd = fd;
++        LOG_INFO(Render_Vulkan, "NBA2K14 frame export connected {}x{}", frame.width, frame.height);
++        return true;
++    }
++
++    const char* path;
++    std::vector<std::unique_ptr<ScreenshotReadback>> buffers;
++    u8* shared = nullptr;
++    int shared_fd = -1;
++    int socket_fd = -1;
++    u32 slot = 0;
++};
++} // namespace
++
+ static std::string SanitizeFilenameComponent(std::string value) {
+     for (char& c : value) {
+         const unsigned char uc = static_cast<unsigned char>(c);
+@@ -1149,6 +1270,35 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
+             swapchain_copied_for_screenshot = true;
+         }
+ 
++        if (FrameExport::Get().Enabled()) {
++            if (!swapchain_copied_for_screenshot) {
++                const vk::ImageMemoryBarrier to_export{
++                    .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
++                    .dstAccessMask = vk::AccessFlagBits::eTransferRead,
++                    .oldLayout = vk::ImageLayout::eColorAttachmentOptimal,
++                    .newLayout = vk::ImageLayout::eTransferSrcOptimal,
++                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++                    .image = swapchain_image,
++                    .subresourceRange{
++                        .aspectMask = vk::ImageAspectFlagBits::eColor,
++                        .baseMipLevel = 0,
++                        .levelCount = 1,
++                        .baseArrayLayer = 0,
++                        .layerCount = VK_REMAINING_ARRAY_LAYERS,
++                    },
++                };
++                cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
++                                       vk::PipelineStageFlagBits::eTransfer,
++                                       vk::DependencyFlagBits::eByRegion, {}, {}, to_export);
++            }
++            CopyImageToReadback(cmdbuf, swapchain_image, vk::ImageLayout::eTransferSrcOptimal,
++                                FrameExport::Get().Buffer(instance, scheduler, extent.width,
++                                                          extent.height,
++                                                          swapchain.GetSurfaceFormat().format));
++            swapchain_copied_for_screenshot = true;
++        }
++
+         const vk::AccessFlags post_src_access_mask =
+             swapchain_copied_for_screenshot ? vk::AccessFlagBits::eTransferRead
+                                             : vk::AccessFlagBits::eColorAttachmentWrite;
+@@ -1208,11 +1358,15 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
+     }
+ 
+     static const bool wait_before_present = std::getenv("NBA2K14_NO_PRESENT_WAIT") == nullptr;
+-    if (wait_before_present) {
++    if (wait_before_present || FrameExport::Get().Enabled()) {
+         [[maybe_unused]] const auto wait_result =
+             instance.GetDevice().waitForFences(frame->present_done, false, 1'000'000'000);
+     }
+ 
++    if (FrameExport::Get().Enabled()) {
++        FrameExport::Get().Publish();
++    }
++
+     // Present to swapchain.
+     {
+         std::scoped_lock submit_lock{Scheduler::submit_mutex};

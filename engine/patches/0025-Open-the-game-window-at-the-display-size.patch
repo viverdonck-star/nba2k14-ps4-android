@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 Android port <nba2k14-android@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 18:54:48 +0100
+Subject: [PATCH 25/40] Open the game window at the display size
+
+Termux:X11 has no window manager, so SDL's fullscreen request leaves
+the window at its 1280x720
+default. With -f true, open the window at the display size instead.
+---
+ src/sdl_window.cpp | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/src/sdl_window.cpp b/src/sdl_window.cpp
+index ffa42d31..2b70c749 100644
+--- a/src/sdl_window.cpp
++++ b/src/sdl_window.cpp
+@@ -111,6 +111,17 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, Input::GameControllers* controller
+     }
+     SDL_InitSubSystem(SDL_INIT_AUDIO);
+ 
++#ifdef ENABLE_NBA_2K14_COMPATIBILITY
++    // Termux:X11 has no window manager, so a fullscreen request alone leaves the default size.
++    if (EmulatorSettings.IsFullScreen()) {
++        if (const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay())) {
++            width = mode->w;
++            height = mode->h;
++            LOG_INFO(Input, "NBA2K14 window opened at display size {}x{}", width, height);
++        }
++    }
++#endif
++
+     SDL_PropertiesID props = SDL_CreateProperties();
+     SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING,
+                           std::string(window_title).c_str());

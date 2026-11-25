@@ -1,0 +1,178 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 Android port <nba2k14-android@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 18:54:48 +0100
+Subject: [PATCH 35/40] Add opt-in GPU timestamps around render passes
+
+Adds NBA2K14_GPU_TIMING=1: GPU timestamps around each render pass,
+logged per pass size and in frame order, to rank what costs most.
+---
+ .../renderer_vulkan/vk_scheduler.cpp          | 128 ++++++++++++++++++
+ 1 file changed, 128 insertions(+)
+
+diff --git a/src/video_core/renderer_vulkan/vk_scheduler.cpp b/src/video_core/renderer_vulkan/vk_scheduler.cpp
+index 290a78a1..1e9479a1 100644
+--- a/src/video_core/renderer_vulkan/vk_scheduler.cpp
++++ b/src/video_core/renderer_vulkan/vk_scheduler.cpp
+@@ -1,8 +1,18 @@
+ // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <cstdlib>
++#include <map>
++#include <mutex>
++#include <string>
++#include <unordered_map>
++#include <vector>
++
++#include <fmt/format.h>
++
+ #include "common/assert.h"
+ #include "common/debug.h"
++#include "common/logging/log.h"
+ #include "common/thread.h"
+ #include "imgui/renderer/texture_manager.h"
+ #include "video_core/renderer_vulkan/vk_instance.h"
+@@ -12,6 +22,111 @@ namespace Vulkan {
+ 
+ constexpr u64 MAX_IN_FLIGHT_SUBMISSIONS = 8;
+ 
++
++namespace {
++// Diagnostic only: one timing state per scheduler, so a read never waits on another scheduler's work.
++constexpr u32 kTimingQueries = 4000;
++constexpr u32 kTimingReadAt = 3000;
++constexpr u32 kTimingSequence = 90;
++
++struct PassRecord {
++    u16 width;
++    u16 height;
++    u16 colors;
++    bool depth;
++};
++
++struct PassTiming {
++    vk::QueryPool pool{};
++    u32 next = 0;
++    bool open = false;
++    float period_ns = 1.0f;
++    std::vector<PassRecord> passes;
++};
++
++bool TimingEnabled() {
++    static const bool enabled = std::getenv("NBA2K14_GPU_TIMING") != nullptr;
++    return enabled;
++}
++
++PassTiming& TimingOf(const void* scheduler) {
++    static std::mutex mutex;
++    static std::unordered_map<const void*, PassTiming> timings;
++    std::scoped_lock lock{mutex};
++    return timings[scheduler];
++}
++
++void PassBegin(const Instance& instance, vk::CommandBuffer cmdbuf, PassTiming& timing,
++               const RenderState& state) {
++    if (!timing.pool) {
++        const vk::QueryPoolCreateInfo pool_ci = {
++            .queryType = vk::QueryType::eTimestamp,
++            .queryCount = kTimingQueries,
++        };
++        auto [result, pool] = instance.GetDevice().createQueryPool(pool_ci);
++        if (result != vk::Result::eSuccess) {
++            return;
++        }
++        timing.pool = pool;
++        timing.period_ns = instance.GetPhysicalDevice().getProperties().limits.timestampPeriod;
++    }
++    if (timing.next + 2 > kTimingQueries) {
++        return;
++    }
++    cmdbuf.resetQueryPool(timing.pool, timing.next, 2);
++    cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, timing.pool, timing.next);
++    timing.passes.push_back({state.width, state.height, state.num_color_attachments,
++                             state.depth_stencil_attachment.image_view != vk::ImageView{}});
++    timing.open = true;
++}
++
++void PassEnd(vk::CommandBuffer cmdbuf, PassTiming& timing) {
++    if (!timing.open) {
++        return;
++    }
++    cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, timing.pool, timing.next + 1);
++    timing.next += 2;
++    timing.open = false;
++}
++
++void PassReport(const Instance& instance, PassTiming& timing) {
++    std::vector<u64> stamps(timing.next);
++    const auto result = instance.GetDevice().getQueryPoolResults(
++        timing.pool, 0, timing.next, stamps.size() * sizeof(u64), stamps.data(), sizeof(u64),
++        vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWait);
++    if (result == vk::Result::eSuccess) {
++        const double to_ms = timing.period_ns / 1'000'000.0;
++        std::map<std::string, std::pair<u32, double>> groups;
++        std::string sequence;
++        double gaps = 0.0;
++        const u32 count = timing.next / 2;
++        for (u32 i = 0; i < count; ++i) {
++            const auto& pass = timing.passes[i];
++            const double ms = double(stamps[i * 2 + 1] - stamps[i * 2]) * to_ms;
++            const auto key = fmt::format("{}x{}c{}{}", pass.width, pass.height, pass.colors,
++                                         pass.depth ? "d" : "");
++            groups[key].first++;
++            groups[key].second += ms;
++            if (i > 0) {
++                gaps += double(stamps[i * 2] - stamps[i * 2 - 1]) * to_ms;
++            }
++            if (i < kTimingSequence) {
++                sequence += fmt::format(" {}={:.2f}", key, ms);
++            }
++        }
++        std::string line;
++        for (const auto& [key, value] : groups) {
++            line += fmt::format(" {}:n{}:{:.1f}", key, value.first, value.second);
++        }
++        LOG_INFO(Render_Vulkan, "NBA2K14_GPUTIME passes={} span_ms={:.1f} gap_ms={:.1f}{}", count,
++                 double(stamps[timing.next - 1] - stamps[0]) * to_ms, gaps, line);
++        LOG_INFO(Render_Vulkan, "NBA2K14_GPUSEQ{}", sequence);
++    }
++    timing.next = 0;
++    timing.passes.clear();
++}
++} // namespace
++
+ std::mutex Scheduler::submit_mutex;
+ 
+ Scheduler::Scheduler(const Instance& instance)
+@@ -37,6 +152,9 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
+     EndRendering();
+     is_rendering = true;
+     render_state = new_state;
++    if (TimingEnabled()) {
++        PassBegin(instance, current_cmdbuf, TimingOf(this), render_state);
++    }
+ 
+     std::array<vk::RenderingAttachmentInfo, 8> color_attachments;
+     for (u32 i = 0; i < render_state.num_color_attachments; ++i) {
+@@ -91,11 +209,21 @@ void Scheduler::EndRendering() {
+     }
+     is_rendering = false;
+     current_cmdbuf.endRendering();
++    if (TimingEnabled()) {
++        PassEnd(current_cmdbuf, TimingOf(this));
++    }
+ }
+ 
+ void Scheduler::Flush(SubmitInfo& info) {
+     // When flushing, we only send data to the driver; no waiting is necessary.
+     SubmitExecution(info);
++    if (TimingEnabled()) {
++        auto& timing = TimingOf(this);
++        if (timing.next >= kTimingReadAt) {
++            master_semaphore.Wait(CurrentTick() - 1);
++            PassReport(instance, timing);
++        }
++    }
+ }
+ 
+ void Scheduler::Flush() {

@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 Android port <nba2k14-android@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 18:54:48 +0100
+Subject: [PATCH 37/40] Space new frames by a fixed time (NBA2K14_FLIP_MS)
+
+Adds NBA2K14_FLIP_MS=<ms>: spaces new frames by that time (25 = 40
+images/s), which whole vblank intervals cannot do on a 60 Hz clock.
+---
+ src/core/libraries/videoout/driver.cpp | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/src/core/libraries/videoout/driver.cpp b/src/core/libraries/videoout/driver.cpp
+index 95a36a03..cf8d4142 100644
+--- a/src/core/libraries/videoout/driver.cpp
++++ b/src/core/libraries/videoout/driver.cpp
+@@ -1,6 +1,8 @@
+ // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <chrono>
++#include <thread>
+ #include <algorithm>
+ #include <cstdlib>
+ #include "common/rdtsc.h"
+@@ -464,6 +466,16 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
+                              "BACHATA_FLIP_TRACE stage=queue_dequeue index={} arg={}", request.index,
+                              request.flip_arg);
+                 }
++                static const auto min_flip_time = [] {
++                    const char* value = std::getenv("NBA2K14_FLIP_MS");
++                    return std::chrono::milliseconds(value ? std::atoi(value) : 0);
++                }();
++                if (min_flip_time.count() > 0) {
++                    using Clock = std::chrono::steady_clock;
++                    static auto next_flip = Clock::now();
++                    std::this_thread::sleep_until(next_flip);
++                    next_flip = std::max(next_flip + min_flip_time, Clock::now());
++                }
+                 Flip(request);
+                 FRAME_END;
+             }

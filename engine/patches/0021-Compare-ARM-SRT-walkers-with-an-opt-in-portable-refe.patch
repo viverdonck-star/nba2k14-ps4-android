@@ -1,0 +1,315 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14-offline-port <nba2k14-offline@localhost>
+Date: Sat, 31 Oct 2026 08:36:51 +0100
+Subject: [PATCH 21/40] Compare ARM SRT walkers with an opt-in portable
+ reference
+
+---
+ src/shader_recompiler/info.h                  |  11 ++
+ .../passes/flatten_extended_userdata_pass.cpp | 113 ++++++++++++++++++
+ src/shader_recompiler/ir/passes/srt.h         |   3 +
+ .../ir/passes/srt_reference.h                 |  66 ++++++++++
+ .../renderer_vulkan/vk_pipeline_cache.cpp     |   8 ++
+ 5 files changed, 201 insertions(+)
+ create mode 100644 src/shader_recompiler/ir/passes/srt_reference.h
+
+diff --git a/src/shader_recompiler/info.h b/src/shader_recompiler/info.h
+index 87c9319a..24a4a6a4 100644
+--- a/src/shader_recompiler/info.h
++++ b/src/shader_recompiler/info.h
+@@ -8,12 +8,15 @@
+ #include <vector>
+ #include <boost/container/static_vector.hpp>
+ #include "common/assert.h"
++#include "common/arch.h"
+ #include "common/types.h"
+ #include "shader_recompiler/backend/bindings.h"
+ #include "shader_recompiler/frontend/copy_shader.h"
+ #include "shader_recompiler/frontend/tessellation.h"
+ #include "shader_recompiler/ir/attribute.h"
+ #include "shader_recompiler/ir/passes/srt.h"
++#include "shader_recompiler/ir/passes/srt_reference.h"
++#include <memory>
+ #include "shader_recompiler/ir/reg.h"
+ #include "shader_recompiler/ir/type.h"
+ #include "shader_recompiler/params.h"
+@@ -125,6 +128,7 @@ struct Info : InfoPersistent {
+     std::span<const u32> user_data;
+     std::vector<u32> flattened_ud_buf;
+     PersistentSrtInfo srt_info;
++    std::shared_ptr<SrtReference::Program> srt_reference; // diagnostic only, never serialized
+ 
+     AttributeFlags loads{};
+     AttributeFlags stores{};
+@@ -199,7 +203,14 @@ struct Info : InfoPersistent {
+         ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
+         std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
+         if (srt_info.walker_func) {
++            if (srt_reference) {
++                std::fill(flattened_ud_buf.begin(), flattened_ud_buf.end(), 0xa5a5a5a5u);
++                std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
++            }
+             srt_info.walker_func(user_data.data(), flattened_ud_buf.data());
++#if defined(ARCH_ARM64) && defined(__linux__)
++            if (srt_reference) CheckSrtReference(*this);
++#endif
+         }
+     }
+ 
+diff --git a/src/shader_recompiler/ir/passes/flatten_extended_userdata_pass.cpp b/src/shader_recompiler/ir/passes/flatten_extended_userdata_pass.cpp
+index 9b2b50f8..04c675af 100644
+--- a/src/shader_recompiler/ir/passes/flatten_extended_userdata_pass.cpp
++++ b/src/shader_recompiler/ir/passes/flatten_extended_userdata_pass.cpp
+@@ -1,6 +1,8 @@
+ // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <algorithm>
++#include <cstdlib>
+ #include <array>
+ #include <atomic>
+ #include <cerrno>
+@@ -30,6 +32,7 @@
+ #include "shader_recompiler/ir/value.h"
+ 
+ #if defined(ARCH_ARM64) && defined(__linux__)
++#include <sys/uio.h>
+ #include <sys/mman.h>
+ #include <sys/ucontext.h>
+ #include <unistd.h>
+@@ -487,6 +490,86 @@ struct PassInfo {
+ 
+ namespace Shader {
+ 
++void CheckSrtReference(Info& info) {
++    auto& ref = *info.srt_reference;
++    auto read = [](u64 address, u32& word) {
++        iovec local{&word, sizeof(word)};
++        iovec remote{reinterpret_cast<void*>(address), sizeof(word)};
++        return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == sizeof(word);
++    };
++    static const bool reader_available = [&] {
++        u32 probe = 0x12345678u, result{};
++        const bool ok = read(reinterpret_cast<u64>(&probe), result) && result == probe;
++        if (!ok) LOG_ERROR(Render_Recompiler, "NBA2K14_SRT_UNAVAILABLE safe reader errno={}", errno);
++        return ok;
++    }();
++    if (!reader_available) return;
++    ref.expected.resize(ref.word_count);
++    ref.source_addresses.resize(ref.word_count);
++    auto compare = [&] {
++        std::fill(ref.expected.begin(), ref.expected.end(), 0x5a5a5a5au);
++        std::fill_n(ref.expected.begin(), NUM_USER_DATA_REGS, 0xa5a5a5a5u);
++        std::copy(info.user_data.begin(), info.user_data.end(), ref.expected.begin());
++        return SrtReference::Execute(ref, info.user_data, ref.expected, read, ref.source_addresses);
++    };
++    auto status = compare();
++    auto first_difference = [&](std::span<const u32> actual) {
++        for (u32 index = 0; index < ref.word_count; ++index) {
++            if (ref.expected[index] != actual[index]) return index;
++        }
++        return ref.word_count;
++    };
++    u32 different = first_difference(info.flattened_ud_buf);
++    u32 arm_value = different < ref.word_count ? info.flattened_ud_buf[different] : 0;
++    if (different != ref.word_count && status.unreadable == 0) {
++        // Repeat into scratch: the checker must not change the shader's actual output.
++        const u32 previous_index = different;
++        const u32 previous_expected = ref.expected[different];
++        const u64 previous_source = ref.source_addresses[different];
++        std::vector<u32> retry(ref.word_count, 0xa5a5a5a5u);
++        std::copy(info.user_data.begin(), info.user_data.end(), retry.begin());
++        info.srt_info.walker_func(info.user_data.data(), retry.data());
++        status = compare();
++        different = first_difference(retry);
++        const bool stable = different == previous_index && status.unreadable == 0 &&
++                            ref.expected[different] == previous_expected &&
++                            ref.source_addresses[different] == previous_source &&
++                            retry[different] == arm_value;
++        if (!stable) {
++            ++ref.transient;
++            different = ref.word_count;
++        }
++    }
++    ++ref.checks;
++    ref.compared_words += ref.word_count - NUM_USER_DATA_REGS;
++    if (status.unreadable) {
++        ++ref.unreadable_checks;
++        if (!ref.reported_unreadable) {
++            ref.reported_unreadable = true;
++            LOG_WARNING(Render_Recompiler,
++                        "NBA2K14_SRT_UNREADABLE shader={:#x} stage={} address={:#x} reads={} errno={}",
++                        info.pgm_hash, static_cast<u32>(info.stage), status.first_unreadable,
++                        status.unreadable, errno);
++        }
++    } else if (different != ref.word_count) {
++        ++ref.differences;
++        if (!ref.reported_difference) {
++            ref.reported_difference = true;
++            LOG_ERROR(Render_Recompiler,
++                      "NBA2K14_SRT_DIFF shader={:#x} stage={} word={} source={:#x} arm={:#x} reference={:#x} check={}",
++                      info.pgm_hash, static_cast<u32>(info.stage), different,
++                      ref.source_addresses[different], arm_value,
++                      ref.expected[different], ref.checks);
++        }
++    }
++    if (ref.checks == 1 || ref.checks % 4096 == 0) {
++        LOG_INFO(Render_Recompiler,
++                 "NBA2K14_SRT_STATS shader={:#x} stage={} checks={} words={} differences={} unreadable={} transient={}",
++                 info.pgm_hash, static_cast<u32>(info.stage), ref.checks, ref.compared_words,
++                 ref.differences, ref.unreadable_checks, ref.transient);
++    }
++}
++
+ PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
+     if (!IsArm64SrtWalker(ptr, size)) {
+         LOG_WARNING(Render_Recompiler,
+@@ -563,6 +646,22 @@ void VisitPointer(u32 offset_dw, IR::Inst* subtree, PassInfo& pass_info,
+     emitter.PopPointer();
+ }
+ 
++SrtReference::Node BuildReferenceNode(u32 pointer_dw, IR::Inst* subtree,
++                                     PassInfo& pass_info, u32& destination_dw) {
++    SrtReference::Node node{pointer_dw};
++    const auto* uses = pass_info.GetUsesAsPointer(subtree);
++    ASSERT(uses);
++    for (const auto& [source_dw, inst] : *uses) {
++        node.copies.push_back({source_dw, destination_dw++});
++    }
++    for (const auto& [source_dw, inst] : *uses) {
++        if (pass_info.GetUsesAsPointer(inst)) {
++            node.children.push_back(BuildReferenceNode(source_dw, inst, pass_info, destination_dw));
++        }
++    }
++    return node;
++}
++
+ void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
+     if (pass_info.srt_roots.empty()) {
+         return;
+@@ -581,6 +680,20 @@ void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
+     ASSERT(info.srt_info.walker_func != nullptr);
+     info.srt_info.walker_func_size = emitter.Size();
+     info.srt_info.flattened_bufsize_dw = pass_info.dst_off_dw;
++    const char* check = std::getenv("NBA2K14_SRT_CHECK");
++    if (check && std::strcmp(check, "1") == 0) {
++        auto reference = std::make_shared<SrtReference::Program>();
++        for (const auto& [sgpr, root] : pass_info.srt_roots) {
++            reference->roots.push_back(BuildReferenceNode(static_cast<u32>(sgpr), root, pass_info,
++                                                         reference->word_count));
++        }
++        ASSERT(reference->word_count == pass_info.dst_off_dw);
++        LOG_INFO(Render_Recompiler, "NBA2K14_SRT_BEGIN shader={:#x} stage={} roots={} words={}",
++                 info.pgm_hash, static_cast<u32>(info.stage), reference->roots.size(),
++                 reference->word_count - NUM_USER_DATA_REGS);
++        info.srt_reference = std::move(reference);
++    }
++
+ }
+ 
+ } // namespace
+diff --git a/src/shader_recompiler/ir/passes/srt.h b/src/shader_recompiler/ir/passes/srt.h
+index 918b832e..22d6bbf6 100644
+--- a/src/shader_recompiler/ir/passes/srt.h
++++ b/src/shader_recompiler/ir/passes/srt.h
+@@ -13,6 +13,9 @@ struct Archive;
+ 
+ namespace Shader {
+ 
++struct Info;
++void CheckSrtReference(Info& info);
++
+ using PFN_SrtWalker = void PS4_SYSV_ABI (*)(const u32* /*user_data*/, u32* /*flat_dst*/);
+ PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size);
+ 
+diff --git a/src/shader_recompiler/ir/passes/srt_reference.h b/src/shader_recompiler/ir/passes/srt_reference.h
+new file mode 100644
+index 00000000..e661a330
+--- /dev/null
++++ b/src/shader_recompiler/ir/passes/srt_reference.h
+@@ -0,0 +1,66 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++#include <cstdint>
++#include <span>
++#include <vector>
++
++namespace Shader::SrtReference {
++// A declarative pointer tree, independent of the ARM instruction emitter.
++struct Copy { std::uint32_t source_dw; std::uint32_t destination_dw; };
++struct Node {
++    std::uint32_t pointer_dw;
++    std::vector<Copy> copies;
++    std::vector<Node> children;
++};
++struct Program {
++    std::vector<Node> roots;
++    std::uint32_t word_count = 16;
++    std::uint64_t checks{}, compared_words{}, differences{}, unreadable_checks{}, transient{};
++    bool reported_difference{}, reported_unreadable{};
++    std::vector<std::uint32_t> expected;
++    std::vector<std::uint64_t> source_addresses;
++};
++struct ReadStatus { std::uint64_t unreadable{}; std::uint64_t first_unreadable{}; };
++
++// Read is a fault-safe callback: bool(uint64_t byte_address, uint32_t& value).
++// Invalid loads become zero, matching the native walker's recovery handler.
++template <typename Read>
++ReadStatus Execute(const Program& program, std::span<const std::uint32_t> user_data,
++                   std::span<std::uint32_t> output, Read&& read,
++                   std::span<std::uint64_t> source_addresses = {}) {
++    ReadStatus status;
++    auto load = [&](std::uint64_t address) {
++        std::uint32_t word{};
++        if (!read(address, word)) {
++            if (status.unreadable++ == 0) status.first_unreadable = address;
++            word = 0;
++        }
++        return word;
++    };
++    auto visit = [&](auto&& self, const Node& node, std::uint64_t parent, bool root) -> void {
++        std::uint32_t lo{}, hi{};
++        if (root) {
++            if (node.pointer_dw + 1 < user_data.size()) {
++                lo = user_data[node.pointer_dw];
++                hi = user_data[node.pointer_dw + 1];
++            } else {
++                ++status.unreadable;
++            }
++        } else {
++            lo = load(parent + std::uint64_t(node.pointer_dw) * 4);
++            hi = load(parent + std::uint64_t(node.pointer_dw) * 4 + 4);
++        }
++        const std::uint64_t pointer = (std::uint64_t(lo) | (std::uint64_t(hi) << 32)) & 0xffffffffffffULL;
++        // As in upstream x86: copy this level first, then recurse into child pointers.
++        for (const auto& copy : node.copies) {
++            const auto address = pointer + std::uint64_t(copy.source_dw) * 4;
++            if (copy.destination_dw < output.size()) output[copy.destination_dw] = load(address);
++            if (copy.destination_dw < source_addresses.size()) source_addresses[copy.destination_dw] = address;
++        }
++        for (const auto& child : node.children) self(self, child, pointer, false);
++    };
++    for (const auto& root : program.roots) visit(visit, root, 0, true);
++    return status;
++}
++} // namespace Shader::SrtReference
+diff --git a/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp b/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+index 56634326..6f162668 100644
+--- a/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
++++ b/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+@@ -340,6 +340,14 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline() {
+         const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(graphics_key);
+         LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}", pipeline_hash);
+ 
++        if (const char* check = std::getenv("NBA2K14_SRT_CHECK"); check && std::strcmp(check, "1") == 0) {
++            for (const auto* shader : infos) {
++                if (shader) LOG_INFO(Render_Vulkan,
++                    "NBA2K14_SRT_PIPELINE pipeline={:#x} shader={:#x} stage={} walker={} reference={}",
++                    pipeline_hash, shader->pgm_hash, static_cast<u32>(shader->stage),
++                    shader->srt_info.walker_func != nullptr, shader->srt_reference != nullptr);
++            }
++        }
+         GraphicsPipeline::SerializationSupport sdata{};
+         try {
+             if (const auto* vs = infos[u32(Shader::LogicalStage::Vertex)]) {

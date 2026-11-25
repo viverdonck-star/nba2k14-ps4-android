@@ -1,0 +1,213 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 Android port <nba2k14-android@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 18:54:48 +0100
+Subject: [PATCH 38/40] Use an offscreen swapchain when frames are exported
+
+With NBA2K14_FRAME_SOCKET the driver's headless WSI crashes (bus error
+in swapchain creation), so the swapchain keeps
+its interface but owns three plain images: no WSI, no semaphores,
+Present does nothing.
+---
+ .../renderer_vulkan/vk_presenter.cpp          |  9 ++-
+ .../renderer_vulkan/vk_swapchain.cpp          | 81 ++++++++++++++++++-
+ src/video_core/renderer_vulkan/vk_swapchain.h |  3 +
+ 3 files changed, 89 insertions(+), 4 deletions(-)
+
+diff --git a/src/video_core/renderer_vulkan/vk_presenter.cpp b/src/video_core/renderer_vulkan/vk_presenter.cpp
+index cd8258fb..641fa2d9 100644
+--- a/src/video_core/renderer_vulkan/vk_presenter.cpp
++++ b/src/video_core/renderer_vulkan/vk_presenter.cpp
+@@ -1193,9 +1193,14 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
+     }
+ 
+     SubmitInfo info{};
+-    info.AddWait(swapchain.GetImageAcquiredSemaphore());
++    const bool uses_wsi = !FrameExport::Get().Enabled();
++    if (uses_wsi) {
++        info.AddWait(swapchain.GetImageAcquiredSemaphore());
++    }
+     info.AddWait(frame->ready_semaphore, frame->ready_tick);
+-    info.AddSignal(swapchain.GetPresentReadySemaphore());
++    if (uses_wsi) {
++        info.AddSignal(swapchain.GetPresentReadySemaphore());
++    }
+     info.AddSignal(frame->present_done);
+     scheduler.Flush(info);
+     if (trace) {
+diff --git a/src/video_core/renderer_vulkan/vk_swapchain.cpp b/src/video_core/renderer_vulkan/vk_swapchain.cpp
+index 97d222a8..6ddc7d32 100644
+--- a/src/video_core/renderer_vulkan/vk_swapchain.cpp
++++ b/src/video_core/renderer_vulkan/vk_swapchain.cpp
+@@ -1,6 +1,8 @@
+ // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <cstdlib>
++#include <vector>
+ #include <algorithm>
+ #include <atomic>
+ #include <limits>
+@@ -12,15 +14,25 @@
+ #include "video_core/renderer_vulkan/vk_instance.h"
+ #include "video_core/renderer_vulkan/vk_swapchain.h"
+ 
++#include <vk_mem_alloc.h>
++
+ namespace Vulkan {
+ 
++static bool OffscreenFrames() {
++    static const bool enabled = std::getenv("NBA2K14_FRAME_SOCKET") != nullptr;
++    return enabled;
++}
++
++static std::vector<VmaAllocation> offscreen_allocations;
++
+ static constexpr vk::SurfaceFormatKHR SURFACE_FORMAT_HDR = {
+     .format = vk::Format::eA2B10G10R10UnormPack32,
+     .colorSpace = vk::ColorSpaceKHR::eHdr10St2084EXT,
+ };
+ 
+ Swapchain::Swapchain(const Instance& instance_, const Frontend::WindowSDL& window_)
+-    : instance{instance_}, window{window_}, surface{CreateSurface(instance.GetInstance(), window)} {
++    : instance{instance_}, window{window_}, surface{OffscreenFrames() ? vk::SurfaceKHR{}
++                                                          : CreateSurface(instance.GetInstance(), window)} {
+     std::fprintf(stderr, "BACHATA_SWAPCHAIN_FORMAT_ENTER\n");
+     FindPresentFormat();
+     std::fprintf(stderr, "BACHATA_SWAPCHAIN_FORMAT_READY\n");
+@@ -36,7 +48,9 @@ Swapchain::Swapchain(const Instance& instance_, const Frontend::WindowSDL& windo
+ 
+ Swapchain::~Swapchain() {
+     Destroy();
+-    instance.GetInstance().destroySurfaceKHR(surface);
++    if (surface) {
++        instance.GetInstance().destroySurfaceKHR(surface);
++    }
+ }
+ 
+ void Swapchain::Create(u32 width_, u32 height_) {
+@@ -46,6 +60,38 @@ void Swapchain::Create(u32 width_, u32 height_) {
+ 
+     Destroy();
+ 
++    if (OffscreenFrames()) {
++        extent = vk::Extent2D{width, height};
++        image_count = 3;
++        images.resize(image_count);
++        offscreen_allocations.resize(image_count);
++        const vk::ImageCreateInfo image_ci = {
++            .imageType = vk::ImageType::e2D,
++            .format = surface_format.format,
++            .extent = {width, height, 1},
++            .mipLevels = 1,
++            .arrayLayers = 1,
++            .samples = vk::SampleCountFlagBits::e1,
++            .tiling = vk::ImageTiling::eOptimal,
++            .usage = vk::ImageUsageFlagBits::eColorAttachment |
++                     vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst,
++            .initialLayout = vk::ImageLayout::eUndefined,
++        };
++        const VkImageCreateInfo raw_ci = static_cast<VkImageCreateInfo>(image_ci);
++        const VmaAllocationCreateInfo alloc_ci = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
++        for (u32 i = 0; i < image_count; ++i) {
++            VkImage image{};
++            const VkResult result = vmaCreateImage(instance.GetAllocator(), &raw_ci, &alloc_ci, &image,
++                                                   &offscreen_allocations[i], nullptr);
++            ASSERT_MSG(result == VK_SUCCESS, "Failed to create offscreen frame image");
++            images[i] = image;
++        }
++        CreateImageViews();
++        RefreshSemaphores();
++        needs_recreation = false;
++        return;
++    }
++
+     SetSurfaceProperties();
+ 
+     const std::array queue_family_indices = {
+@@ -110,6 +156,10 @@ void Swapchain::SetHDR(bool hdr) {
+ }
+ 
+ bool Swapchain::AcquireNextImage() {
++    if (OffscreenFrames()) {
++        image_index = (image_index + 1) % image_count;
++        return true;
++    }
+     vk::Device device = instance.GetDevice();
+     vk::Result result =
+         device.acquireNextImageKHR(swapchain, std::numeric_limits<u64>::max(),
+@@ -152,6 +202,10 @@ bool Swapchain::AcquireNextImage() {
+ }
+ 
+ bool Swapchain::Present() {
++    if (OffscreenFrames()) {
++        frame_index = (frame_index + 1) % image_count;
++        return true;
++    }
+ 
+     const vk::PresentInfoKHR present_info = {
+         .waitSemaphoreCount = 1,
+@@ -186,6 +240,12 @@ bool Swapchain::Present() {
+ }
+ 
+ void Swapchain::FindPresentFormat() {
++    if (OffscreenFrames()) {
++        surface_format.format = vk::Format::eR8G8B8A8Unorm;
++        surface_format.colorSpace = vk::ColorSpaceKHR::eSrgbNonlinear;
++        return;
++    }
++
+     const auto [formats_result, formats] =
+         instance.GetPhysicalDevice().getSurfaceFormatsKHR(surface);
+     ASSERT_MSG(formats_result == vk::Result::eSuccess, "Failed to query surface formats: {}",
+@@ -225,6 +285,11 @@ void Swapchain::FindPresentFormat() {
+ }
+ 
+ void Swapchain::FindPresentMode() {
++    if (OffscreenFrames()) {
++        present_mode = vk::PresentModeKHR::eFifo;
++        return;
++    }
++
+     const auto [modes_result, modes] =
+         instance.GetPhysicalDevice().getSurfacePresentModesKHR(surface);
+     if (modes_result != vk::Result::eSuccess) {
+@@ -305,6 +370,13 @@ void Swapchain::Destroy() {
+     if (swapchain) {
+         device.destroySwapchainKHR(swapchain);
+     }
++    if (OffscreenFrames()) {
++        for (size_t i = 0; i < offscreen_allocations.size(); ++i) {
++            vmaDestroyImage(instance.GetAllocator(), images[i], offscreen_allocations[i]);
++        }
++        offscreen_allocations.clear();
++        images.clear();
++    }
+ 
+     for (const auto& sem : image_acquired) {
+         device.destroySemaphore(sem);
+@@ -349,6 +421,11 @@ void Swapchain::SetupImages() {
+                vk::to_string(images_result));
+     images = std::move(imgs);
+     image_count = static_cast<u32>(images.size());
++    CreateImageViews();
++}
++
++void Swapchain::CreateImageViews() {
++    vk::Device device = instance.GetDevice();
+     images_view.resize(image_count);
+     for (u32 i = 0; i < image_count; ++i) {
+         if (images_view[i]) {
+diff --git a/src/video_core/renderer_vulkan/vk_swapchain.h b/src/video_core/renderer_vulkan/vk_swapchain.h
+index 826705d4..a102d153 100644
+--- a/src/video_core/renderer_vulkan/vk_swapchain.h
++++ b/src/video_core/renderer_vulkan/vk_swapchain.h
+@@ -108,6 +108,9 @@ private:
+     /// Performs creation of image views and framebuffers from the swapchain images
+     void SetupImages();
+ 
++    /// Creates a view for each swapchain image
++    void CreateImageViews();
++
+     /// Creates the image acquired and present ready semaphores
+     void RefreshSemaphores();
+ 

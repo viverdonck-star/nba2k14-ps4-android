@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 offline port <nba2k14-offline@localhost>
+Date: Fri, 30 Oct 2026 11:43:23 +0100
+Subject: [PATCH 05/40] Support NBA 2K14 RGB565 sRGB and macro-tiled compressed
+ textures
+
+---
+ src/video_core/renderer_vulkan/liverpool_to_vk.cpp |  4 ++++
+ src/video_core/texture_cache/image_info.cpp        | 12 ++++++++++++
+ 2 files changed, 16 insertions(+)
+
+diff --git a/src/video_core/renderer_vulkan/liverpool_to_vk.cpp b/src/video_core/renderer_vulkan/liverpool_to_vk.cpp
+index 0057bf10..bffe8b35 100644
+--- a/src/video_core/renderer_vulkan/liverpool_to_vk.cpp
++++ b/src/video_core/renderer_vulkan/liverpool_to_vk.cpp
+@@ -686,6 +686,10 @@ std::span<const SurfaceFormatInfo> SurfaceFormats() {
+         // 5_6_5
+         CreateSurfaceFormatInfo(AmdGpu::DataFormat::Format5_6_5, AmdGpu::NumberFormat::Unorm,
+                                 vk::Format::eR5G6B5UnormPack16),
++        // Vulkan has no packed RGB565 sRGB format. Preserve the guest number format in the
++        // resource metadata while using the bit-compatible UNORM surface as its host fallback.
++        CreateSurfaceFormatInfo(AmdGpu::DataFormat::Format5_6_5, AmdGpu::NumberFormat::Srgb,
++                                vk::Format::eR5G6B5UnormPack16),
+         // 1_5_5_5
+         CreateSurfaceFormatInfo(AmdGpu::DataFormat::Format1_5_5_5, AmdGpu::NumberFormat::Unorm,
+                                 vk::Format::eA1R5G5B5UnormPack16),
+diff --git a/src/video_core/texture_cache/image_info.cpp b/src/video_core/texture_cache/image_info.cpp
+index 1167bd7e..40b58af9 100644
+--- a/src/video_core/texture_cache/image_info.cpp
++++ b/src/video_core/texture_cache/image_info.cpp
+@@ -2,8 +2,14 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include "common/assert.h"
++#ifdef ENABLE_NBA_2K14_COMPATIBILITY
++#include "common/elf_info.h"
++#endif
+ #include "core/libraries/kernel/process.h"
+ #include "core/libraries/videoout/buffer.h"
++#ifdef ENABLE_NBA_2K14_COMPATIBILITY
++#include "core/nba_2k14_compatibility.h"
++#endif
+ #include "shader_recompiler/resource.h"
+ #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+ #include "video_core/texture_cache/host_compatibility.h"
+@@ -193,7 +199,13 @@ void ImageInfo::UpdateSize() {
+             mip_d += (-mip_d) & (thickness - 1);
+             [[fallthrough]];
+         case AmdGpu::ArrayMode::Array2DTiledThin1: {
++#ifdef ENABLE_NBA_2K14_COMPATIBILITY
++            ASSERT_MSG(!props.is_block || Core::Nba2K14Compatibility::IsTitle(
++                                                Common::ElfInfo::Instance().Title()),
++                       "Block-compressed macro-tiled sizing is only enabled for NBA 2K14");
++#else
+             ASSERT(!props.is_block);
++#endif
+             std::tie(mip_info.pitch, mip_info.height, mip_info.size) = ImageSizeMacroTiled(
+                 mip_w, mip_h, thickness, num_bits, num_samples, tile_mode, mip, alt_tile);
+             break;

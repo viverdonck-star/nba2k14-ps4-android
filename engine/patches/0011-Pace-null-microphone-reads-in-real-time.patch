@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14-offline-port <nba2k14-offline@localhost>
+Date: Fri, 30 Oct 2026 21:53:34 +0100
+Subject: [PATCH 11/40] Pace null microphone reads in real time
+
+---
+ src/core/libraries/audio/sdl_audio_in.cpp | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/src/core/libraries/audio/sdl_audio_in.cpp b/src/core/libraries/audio/sdl_audio_in.cpp
+index 6e7a7bdb..358929ee 100644
+--- a/src/core/libraries/audio/sdl_audio_in.cpp
++++ b/src/core/libraries/audio/sdl_audio_in.cpp
+@@ -1,7 +1,9 @@
+ // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <chrono>
+ #include <cstring>
++#include <thread>
+ #include <SDL3/SDL.h>
+ #include <common/logging/log.h>
+ #include <core/emulator_settings.h>
+@@ -99,7 +101,16 @@ public:
+             const int framesRead = bytesRead / (port.sample_size * port.channels_num);
+             return framesRead;
+         } else if (internal_buffer) {
+-            // Return silence from null device buffer
++            // Return silence from null device buffer, paced like a real device.
++            if (port.freq != 0) {
++                const auto period = std::chrono::microseconds(1000000ULL * port.samples_num / port.freq);
++                const auto now = std::chrono::steady_clock::now();
++                if (next_null_read < now - period * 4) {
++                    next_null_read = now;
++                }
++                next_null_read += period;
++                std::this_thread::sleep_until(next_null_read);
++            }
+             std::memcpy(out_buffer, internal_buffer, bytesToRead);
+             return port.samples_num;
+         } else {
+@@ -126,6 +137,7 @@ private:
+     SDL_AudioStream* stream = nullptr;
+     void* internal_buffer = nullptr;
+     bool nullDevice = false;
++    std::chrono::steady_clock::time_point next_null_read{};
+ };
+ 
+ std::unique_ptr<PortInBackend> SDLAudioIn::Open(PortIn& port) {

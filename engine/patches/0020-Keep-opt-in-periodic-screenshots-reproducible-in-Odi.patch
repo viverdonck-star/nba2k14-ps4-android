@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14-offline-port <nba2k14-offline@localhost>
+Date: Sat, 31 Oct 2026 07:43:28 +0100
+Subject: [PATCH 20/40] Keep opt-in periodic screenshots reproducible in Odin
+ builds
+
+---
+ src/video_core/renderer_vulkan/vk_presenter.cpp | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/src/video_core/renderer_vulkan/vk_presenter.cpp b/src/video_core/renderer_vulkan/vk_presenter.cpp
+index 55674773..5b3a1e67 100644
+--- a/src/video_core/renderer_vulkan/vk_presenter.cpp
++++ b/src/video_core/renderer_vulkan/vk_presenter.cpp
+@@ -33,6 +33,7 @@
+ #include <cstring>
+ #include <ctime>
+ #include <filesystem>
++#include <fstream>
+ #include <iomanip>
+ #include <limits>
+ #include <memory>
+@@ -764,6 +765,18 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup&
+     const vk::Extent2D image_size = {image.info.size.width, image.info.size.height};
+     expected_ratio = static_cast<float>(image_size.width) / static_cast<float>(image_size.height);
+ 
++    // Opt-in capture cadence used by remote Odin tests.
++    static const u32 auto_shot_every = [] {
++        u32 cadence{};
++        std::ifstream file(Common::FS::GetUserPath(Common::FS::PathType::UserDir) / "auto_shot_every");
++        file >> cadence;
++        return cadence;
++    }();
++    static u64 auto_shot_frame{};
++    if (auto_shot_every && ++auto_shot_frame % auto_shot_every == 0) {
++        VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::GameOnly);
++        VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::WithOverlays);
++    }
+     const u32 capture_game_only_count = VideoCore::ConsumeGameOnlyScreenshotRequests();
+     std::vector<ScreenshotReadback> pending_screenshots;
+     if (capture_game_only_count > 0) {

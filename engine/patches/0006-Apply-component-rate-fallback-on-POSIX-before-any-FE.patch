@@ -1,0 +1,280 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NBA2K14 offline port <nba2k14-offline@localhost>
+Date: Fri, 30 Oct 2026 11:43:31 +0100
+Subject: [PATCH 06/40] Apply component-rate fallback on POSIX before any FEX
+ guest execution
+
+---
+ src/core/module.cpp  |  16 ++++
+ src/core/signals.cpp | 182 +++++++++++++++++++++++++++++++++++++++++++
+ src/core/signals.h   |  16 ++++
+ 3 files changed, 214 insertions(+)
+
+diff --git a/src/core/module.cpp b/src/core/module.cpp
+index e8fd4546..8e242f9a 100644
+--- a/src/core/module.cpp
++++ b/src/core/module.cpp
+@@ -338,6 +338,22 @@ void Module::LoadModuleToMemory(u32& max_tls_index) {
+             MemoryPatcher::OnGameLoaded();
+         }
+     }
++
++#ifdef ENABLE_NBA_2K14_COMPATIBILITY
++    if (is_nba_2k14_eboot) {
++        std::vector<ExecutableMemoryRange> executable_ranges;
++        executable_ranges.reserve(elf_header.e_phnum);
++        for (u16 i = 0; i < elf_header.e_phnum; i++) {
++            const auto& program_header = elf_pheader[i];
++            if (program_header.p_filesz != 0 && (program_header.p_flags & PF_EXEC) != 0 &&
++                (program_header.p_type == PT_LOAD || program_header.p_type == PT_SCE_RELRO)) {
++                executable_ranges.push_back({base_virtual_addr + program_header.p_vaddr,
++                                             program_header.p_filesz});
++            }
++        }
++        ApplyNba2K14ComponentRateFallback(executable_ranges);
++    }
++#endif
+ }
+ 
+ void Module::LoadDynamicInfo() {
+diff --git a/src/core/signals.cpp b/src/core/signals.cpp
+index 7d142597..ccb4f831 100644
+--- a/src/core/signals.cpp
++++ b/src/core/signals.cpp
+@@ -13,11 +13,20 @@
+ #endif
+ #include "emulator.h"
+ 
++#ifdef ENABLE_NBA_2K14_COMPATIBILITY
++#include <algorithm>
++#include <array>
++#include <cstring>
++#include <vector>
++#endif
++
+ #ifdef _WIN32
+ #include <windows.h>
+ static constexpr DWORD MS_VC_EXCEPTION = 0x406D1388;
+ #else
+ #include <csignal>
++#include <sys/mman.h>
++#include <unistd.h>
+ #include <pthread.h>
+ #ifdef ARCH_X86_64
+ #include <Zydis/Formatter.h>
+@@ -33,8 +42,181 @@ extern std::array<OrbisKernelExceptionHandler, 32> Handlers;
+ 
+ namespace Core {
+ 
++#ifdef ENABLE_NBA_2K14_COMPATIBILITY
++bool WriteNba2K14CompatibilityBytes(uintptr_t address, std::span<const u8> values) noexcept {
++    if (values.empty()) {
++        return true;
++    }
++#ifdef _WIN32
++    DWORD old_protect = 0;
++    if (!VirtualProtect(reinterpret_cast<void*>(address), values.size(), PAGE_EXECUTE_READWRITE,
++                        &old_protect)) {
++        return false;
++    }
++
++    std::memcpy(reinterpret_cast<void*>(address), values.data(), values.size());
++    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<const void*>(address),
++                          values.size());
++
++    DWORD ignored = 0;
++    return VirtualProtect(reinterpret_cast<void*>(address), values.size(), old_protect, &ignored) !=
++           0;
++#else
++    // Called only while loading a new module, before FEX can translate its code.
++    // AddressSpace::Map uses RW host pages on ARM64, RWX on native x86-64.
++    const long page_size = sysconf(_SC_PAGESIZE);
++    if (page_size <= 0 || address > UINTPTR_MAX - values.size()) {
++        return false;
++    }
++    const auto mask = static_cast<uintptr_t>(page_size - 1);
++    const auto start = address & ~mask;
++    const auto last = (address + values.size() - 1) & ~mask;
++    const auto length = last - start + page_size;
++    int loader_protection = PROT_READ | PROT_WRITE;
++#ifdef ARCH_X86_64
++    loader_protection |= PROT_EXEC;
++#endif
++    if (mprotect(reinterpret_cast<void*>(start), length, loader_protection) != 0) {
++        return false;
++    }
++    std::memcpy(reinterpret_cast<void*>(address), values.data(), values.size());
++    auto* first = reinterpret_cast<char*>(address);
++    __builtin___clear_cache(first, first + values.size());
++    return mprotect(reinterpret_cast<void*>(start), length, loader_protection) == 0;
++#endif
++}
++
++void ApplyNba2K14ComponentRateFallback(
++    std::span<const ExecutableMemoryRange> executable_ranges) noexcept {
++    // The branch displacement varies between executable revisions. The surrounding provider ID,
++    // state member, configured-rate load and output store form the compatibility contract.
++    static constexpr std::array<s16, 43> ProviderPattern{
++        0x81, 0xfe, 0x9c, 0xdd, 0x49, 0x2d, 0x0f, 0x85, -1,   -1,   -1,
++        -1,   0xb8, 0x92, 0xdd, 0x23, 0xc0, 0x48, 0x83, 0xbf, 0x90, 0x00,
++        0x00, 0x00, 0x00, 0x0f, 0x84, -1,   -1,   -1,   -1,   0xc5, 0xfa,
++        0x10, 0x87, 0x0c, 0x01, 0x00, 0x00, 0xc5, 0xfa, 0x11, 0x02,
++    };
++    static constexpr size_t StateGateOffset = 25;
++    static constexpr std::array<u8, 2> StateGateOpcode{0x0f, 0x84};
++    static constexpr std::array<u8, 6> BypassStateGate{0x90, 0x90, 0x90,
++                                                       0x90, 0x90, 0x90};
++    static constexpr size_t ScanChunkSize = 1 << 20;
++
++    std::vector<uintptr_t> matches;
++    std::vector<u8> buffer(ScanChunkSize + ProviderPattern.size() - 1);
++
++    for (const auto& range : executable_ranges) {
++        if (range.address == 0 || range.size < ProviderPattern.size()) {
++            continue;
++        }
++
++        size_t range_offset = 0;
++        while (range_offset < range.size && matches.size() < 2) {
++            const size_t requested =
++                std::min(buffer.size(), static_cast<size_t>(range.size - range_offset));
++#ifdef _WIN32
++            SIZE_T bytes_read = 0;
++            if (!ReadProcessMemory(GetCurrentProcess(),
++                                   reinterpret_cast<const void*>(range.address + range_offset),
++                                   buffer.data(), requested, &bytes_read) ||
++                bytes_read != requested) {
++                LOG_ERROR(Debug,
++                          "NBA 2K14 compatibility: could not scan executable memory range "
++                          "at {:#x} (size {:#x})",
++                          range.address + range_offset, requested);
++                break;
++            }
++
++#else
++            // Ranges come exclusively from the module's mapped executable PT_LOAD/RELRO
++            // segments; direct reads are safe before any guest thread is started.
++            std::memcpy(buffer.data(), reinterpret_cast<const void*>(range.address + range_offset),
++                        requested);
++            const size_t bytes_read = requested;
++#endif
++            if (bytes_read < ProviderPattern.size()) {
++                break;
++            }
++            const size_t last_start = bytes_read - ProviderPattern.size();
++            for (size_t candidate = 0; candidate <= last_start; ++candidate) {
++                bool is_match = true;
++                for (size_t pattern_index = 0; pattern_index < ProviderPattern.size();
++                     ++pattern_index) {
++                    const s16 expected = ProviderPattern[pattern_index];
++                    if (expected >= 0 && buffer[candidate + pattern_index] != expected) {
++                        is_match = false;
++                        break;
++                    }
++                }
++                if (is_match) {
++                    matches.push_back(range.address + range_offset + candidate);
++                    if (matches.size() == 2) {
++                        break;
++                    }
++                }
++            }
++
++            if (requested == range.size - range_offset) {
++                break;
++            }
++            range_offset += bytes_read - (ProviderPattern.size() - 1);
++        }
++        if (matches.size() == 2) {
++            break;
++        }
++    }
++
++    if (matches.empty()) {
++        LOG_WARNING(Debug,
++                    "NBA 2K14 compatibility: component-rate provider signature was not found; "
++                    "continuing without that fallback");
++        return;
++    }
++    if (matches.size() != 1) {
++        LOG_ERROR(Debug,
++                  "NBA 2K14 compatibility: component-rate provider signature was ambiguous; "
++                  "no executable bytes were changed");
++        return;
++    }
++
++    const uintptr_t state_gate = matches.front() + StateGateOffset;
++    std::array<u8, 6> observed_state_gate{};
++#ifdef _WIN32
++    SIZE_T state_gate_bytes_read = 0;
++    if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(state_gate),
++                           observed_state_gate.data(), observed_state_gate.size(),
++                           &state_gate_bytes_read) ||
++        state_gate_bytes_read != observed_state_gate.size() ||
++#else
++    std::memcpy(observed_state_gate.data(), reinterpret_cast<const void*>(state_gate),
++                observed_state_gate.size());
++    if (
++#endif
++        !std::equal(StateGateOpcode.begin(), StateGateOpcode.end(),
++                    observed_state_gate.begin())) {
++        LOG_ERROR(Debug,
++                  "NBA 2K14 compatibility: component-rate state gate changed after signature "
++                  "matching; no executable bytes were changed");
++        return;
++    }
++    if (!WriteNba2K14CompatibilityBytes(state_gate, BypassStateGate)) {
++        LOG_ERROR(Debug,
++                  "NBA 2K14 compatibility: failed to bypass the component-rate state gate "
++                  "at {:#x}",
++                  state_gate);
++        return;
++    }
++
++    LOG_WARNING(Debug,
++                "NBA 2K14 compatibility: bypassed the component-rate state gate at {:#x}",
++                state_gate);
++}
++#endif
++
++
+ #if defined(_WIN32)
+ 
++
+ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
+     const auto* signals = Signals::Instance();
+     DWORD code = 0;
+diff --git a/src/core/signals.h b/src/core/signals.h
+index 01138369..6ac7ebbd 100644
+--- a/src/core/signals.h
++++ b/src/core/signals.h
+@@ -5,6 +5,9 @@
+ 
+ #include <set>
+ #include <signal.h>
++#ifdef ENABLE_NBA_2K14_COMPATIBILITY
++#include <span>
++#endif
+ #include "common/singleton.h"
+ #include "common/types.h"
+ 
+@@ -18,6 +21,19 @@ namespace Core {
+ using AccessViolationHandler = bool (*)(void* context, void* fault_address);
+ using IllegalInstructionHandler = bool (*)(void* context);
+ 
++#ifdef ENABLE_NBA_2K14_COMPATIBILITY
++struct ExecutableMemoryRange {
++    uintptr_t address;
++    size_t size;
++};
++
++// Only for newly mapped module code, before guest execution or translation.
++bool WriteNba2K14CompatibilityBytes(uintptr_t address, std::span<const u8> values) noexcept;
++
++void ApplyNba2K14ComponentRateFallback(
++    std::span<const ExecutableMemoryRange> executable_ranges) noexcept;
++#endif
++
+ #ifndef _WIN32
+ void SignalHandler(int sig, siginfo_t* info, void* raw_context);
+ #endif
