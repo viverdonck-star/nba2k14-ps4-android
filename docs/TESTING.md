@@ -3,12 +3,12 @@
 ## On a device
 
 The reference device is an **AYN Odin 3** (Snapdragon 8 Elite, Adreno 830, 12 GB, 120 Hz), where full matches,
-saves and reloads, sound and gamepad were played through. Up to version 0.13 every release was tested there.
+saves and reloads, sound and gamepad were played through during development.
 
 ## On an Android emulator
 
-Version 0.14 adds what matters on other devices: driver choice, the DEVICE report, the on-screen pad, the heat
-watch. These were tested on an Android 14 emulator (Pixel 7 profile, 2400 × 1080 with a camera cutout, plus tablet
+What matters on other devices (driver choice, the DEVICE report, the on-screen pad, the heat watch) was tested on
+an Android 14 emulator (Pixel 7 profile, 2400 × 1080 with a camera cutout, plus tablet
 2560 × 1600 and small 1600 × 720 screens). The engine itself can't run there (no Adreno or Mali GPU), so the test
 build's `sans-moteur` and `gpu-essai.txt` switches stand in for it (see [BUILDING.md](BUILDING.md#test-builds)).
 

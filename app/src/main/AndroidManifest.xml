@@ -2,7 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.nba2k14.autonome"
     android:versionCode="14"
-    android:versionName="0.14">
+    android:versionName="0.2">
 
     <!-- Target 28: Android forbids exec from app data for 29 and above (see PLAN-APP-AUTONOME.md).
          No storage permission: the game folder is read through the picker's descriptors. -->

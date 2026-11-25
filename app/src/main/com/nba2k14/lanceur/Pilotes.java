@@ -35,7 +35,7 @@ final class Pilotes {
         }
     }
 
-    /** The driver library in the engine's files; the first one stays where 0.13 had it. */
+    /** The driver library in the engine's files; the default one keeps its original place. */
     static File bibliotheque(File racine, String id) {
         switch (id) {
         case SEPT: return new File(racine, "pilotes/turnip-7xx/libvulkan_freedreno.so");

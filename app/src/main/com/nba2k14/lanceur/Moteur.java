@@ -22,7 +22,7 @@ import java.util.zip.ZipInputStream;
  * storage.
  */
 final class Moteur {
-    private static final int VERSION = 8; // 0.14: the drivers of pilotes/
+    private static final int VERSION = 8; // raised whenever the engine package changes
     private static final String SAUVEGARDES = "home/.local/share/shadPS4/home/1000/savedata/CUSA00104";
 
     private Moteur() {}
@@ -183,7 +183,7 @@ final class Moteur {
             }
         }
         new File(root, "tmp").mkdirs();
-        // Two trial drivers of 0.13, never used: 30 MB back.
+        // Two trial drivers of development builds, never used: 30 MB back.
         new File(root, "turnip/libvulkan-gen8-v4.so").delete();
         new File(root, "turnip/libvulkan-banner-a8xx.so").delete();
         try (OutputStream out = new FileOutputStream(marqueur(context))) {
@@ -192,7 +192,7 @@ final class Moteur {
     }
 
     /**
-     * Up to 0.7 the engine's home, saves included, was in the private files. It is copied once to the app's
+     * Early development builds kept the engine's home, saves included, in the private files. It is copied once to the app's
      * folder; the old copy is kept, renamed home-avant-0.8, until the player has checked their saves.
      */
     private static void deplacerHome(Context context, Progression progression) throws IOException {
